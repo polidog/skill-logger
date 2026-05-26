@@ -89,6 +89,23 @@ slash command 投入を自動で記録できる。`skill-logger` は失敗して
 それ以外の payload は無視 (exit 0)。`--source codex` で source 列を切り替えられる
 ので、Codex 側でも同等の hook 仕組みがあれば同じバイナリで併用できる。
 
+### skill と command の判定について
+
+Claude Code では Skills と slash command は内部的に統合されており、
+`.claude/skills/<name>/SKILL.md` と `.claude/commands/<name>.md` のどちらで定義しても
+同じ `/<name>` で呼び出せる。一方で **起動経路は分かれている** ため、
+skill-logger では次のように記録される。
+
+| 起動経路 | 発火する hook | skill-logger の記録 |
+| --- | --- | --- |
+| Claude が `Skill` ツール経由で起動 (`SKILL.md` 形式 + 自動起動) | `PreToolUse` (`tool_name=Skill`) | `kind=skill` |
+| ユーザーが `/<name>` をプロンプトに直接入力 (commands 形式のプロンプト展開) | `UserPromptSubmit` | `kind=command` |
+
+そのため、同じ名前のスキル/コマンドでも、どう呼び出されたかによって `kind` が
+変わる場合がある (例: `/dev` がプロンプト入力経由なら command として記録される)。
+これは Claude Code 側の挙動をそのまま反映したものなので、skill-logger としては
+両方の経路を別々の利用イベントとして残す方針にしている。
+
 ## 使い方
 
 ### TUI
