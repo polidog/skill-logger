@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"os"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/spf13/cobra"
 
 	"github.com/polidog/skill-logger/internal/store"
+	"github.com/polidog/skill-logger/internal/tui"
 )
 
 var (
@@ -21,19 +23,37 @@ func New() *cobra.Command {
 		Long: `skill-logger records which Skills and slash commands you use in Claude Code
 (and optionally Codex) and lets you browse the stats in a terminal UI.
 
+Run "skill-logger" with no arguments to launch the TUI.
+
 Configure your ~/.claude/settings.json hooks so that PreToolUse(Skill) and
 UserPromptSubmit pipe their JSON payload into "skill-logger record" — see the
 README for a copy-pasteable snippet.`,
 		SilenceUsage: true,
+		RunE:         runTUI,
 	}
 	root.PersistentFlags().StringVar(&flagDBPath, "db", "", "path to events database (default: $SKILL_LOGGER_DIR/events.db or ~/.skill-logger/events.db)")
 
 	root.AddCommand(newRecordCmd())
-	root.AddCommand(newTUICmd())
 	root.AddCommand(newStatsCmd())
 	root.AddCommand(newSyncCmd())
 	root.AddCommand(newVersionCmd())
 	return root
+}
+
+func runTUI(cmd *cobra.Command, args []string) error {
+	ctx := cmd.Context()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	s, err := openStore(ctx)
+	if err != nil {
+		return err
+	}
+	defer s.Close()
+
+	p := tea.NewProgram(tui.New(s), tea.WithAltScreen(), tea.WithContext(ctx))
+	_, err = p.Run()
+	return err
 }
 
 func resolveDBPath() (string, error) {

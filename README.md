@@ -3,10 +3,10 @@
 Claude Code（および Codex）で使った **Skill** と **slash command** の利用状況を
 SQLite/Turso に記録し、ターミナル UI で集計を眺めるためのツール。
 
+- `skill-logger`        … Bubble Tea 製の TUI で 4 つのビューを切替表示
+  - Skills / Commands / Daily / Recent
 - `skill-logger record` … hook から渡された JSON を読んで 1 件記録する
 - `skill-logger stats`  … ランキング / 日次タイムラインを stdout に出す
-- `skill-logger tui`    … Bubble Tea 製の TUI で 4 つのビューを切替表示
-  - Skills / Commands / Daily / Recent
 - `skill-logger sync`   … Turso embedded replicas を手動同期（ローカル SQLite では no-op）
 
 データは既定で `~/.skill-logger/events.db` に保存される。`SKILL_LOGGER_DIR` で変更可。
@@ -73,7 +73,7 @@ slash command 投入を自動で記録できる。`skill-logger` は失敗して
 ### TUI
 
 ```sh
-skill-logger tui
+skill-logger
 ```
 
 - `tab` / `←` `→` / `1`–`4`: ビュー切替
