@@ -35,11 +35,19 @@ type recordAction int
 
 const (
 	actionNone recordAction = iota
-	actionInsertSkill
-	actionInsertCommand
 	actionFinishSkill
 	actionFinishTurn
 )
+
+type insertSpec struct {
+	kind store.Kind
+	name string
+}
+
+type classifyResult struct {
+	inserts  []insertSpec
+	finalize recordAction
+}
 
 func newRecordCmd() *cobra.Command {
 	var (
@@ -52,12 +60,18 @@ func newRecordCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "record",
 		Short: "Read a hook JSON payload from stdin and append/finalize an event",
-		Long: `Reads a single JSON object from stdin (the payload Claude Code passes to a
-hook) and records the relevant event.
+		Long: `Reads a single JSON object from stdin (the payload Claude Code or Codex
+passes to a hook) and records the relevant event.
 
 Auto-detected payloads:
   * PreToolUse + tool_name=Skill                  -> insert  kind=skill
+                                                     (Claude Code only; Codex
+                                                     does not expose Skill as
+                                                     a tool)
   * UserPromptSubmit where prompt starts with "/" -> insert  kind=command
+  * UserPromptSubmit with $name mentions (Codex)  -> insert  kind=skill per
+                                                     mention (only when
+                                                     --source=codex)
   * PostToolUse + tool_name=Skill                 -> finalize the matching skill row
                                                      (writes duration_ms + token usage)
   * Stop                                          -> finalize the latest pending command
@@ -95,8 +109,8 @@ exit 0 silently (so it never blocks the hook).`,
 				}
 			}
 
-			action, kind, name := classify(p, kindOvr, nameOvr)
-			if action == actionNone {
+			res := classify(p, source, kindOvr, nameOvr)
+			if len(res.inserts) == 0 && res.finalize == actionNone {
 				return nil
 			}
 
@@ -114,8 +128,7 @@ exit 0 silently (so it never blocks the hook).`,
 				}
 			}
 
-			switch action {
-			case actionInsertSkill, actionInsertCommand:
+			for _, item := range res.inserts {
 				ev := store.Event{
 					Source:    store.Source(source),
 					Timestamp: payloadTS,
@@ -123,8 +136,8 @@ exit 0 silently (so it never blocks the hook).`,
 					Raw:       string(data),
 					SessionID: p.SessionID,
 					Cwd:       p.Cwd,
-					Kind:      kind,
-					Name:      name,
+					Kind:      item.kind,
+					Name:      item.name,
 					ToolUseID: p.ToolUseID,
 				}
 				if err := s.Insert(ctx, ev); err != nil {
@@ -133,9 +146,11 @@ exit 0 silently (so it never blocks the hook).`,
 				if !quiet {
 					fmt.Fprintf(os.Stderr, "skill-logger: recorded %s/%s = %s\n", ev.Source, ev.Kind, ev.Name)
 				}
+			}
 
+			switch res.finalize {
 			case actionFinishSkill:
-				u, _ := transcript.LatestUsage(p.TranscriptPath)
+				u, _ := transcript.LatestUsage(p.TranscriptPath, source)
 				start, ok, err := s.StartTime(ctx, p.ToolUseID)
 				if err != nil {
 					return fmt.Errorf("lookup start: %w", err)
@@ -161,25 +176,29 @@ exit 0 silently (so it never blocks the hook).`,
 				if p.SessionID == "" {
 					return nil
 				}
-				start, ok, err := s.StartTimeForPendingCommand(ctx, p.SessionID)
+				pending, err := s.PendingRows(ctx, p.SessionID)
 				if err != nil {
-					return fmt.Errorf("lookup pending command: %w", err)
+					return fmt.Errorf("lookup pending rows: %w", err)
 				}
-				if !ok {
+				if len(pending) == 0 {
 					return nil
 				}
-				u, _ := transcript.LatestUsage(p.TranscriptPath)
-				dur := now.Sub(start).Milliseconds()
-				if dur < 0 {
-					dur = 0
+				u, _ := transcript.LatestUsage(p.TranscriptPath, source)
+				var finalized int64
+				for _, row := range pending {
+					dur := now.Sub(row.Timestamp).Milliseconds()
+					if dur < 0 {
+						dur = 0
+					}
+					n, err := s.FinalizeRow(ctx, row.ID, dur, u)
+					if err != nil {
+						return fmt.Errorf("finalize row %d: %w", row.ID, err)
+					}
+					finalized += n
 				}
-				n, err := s.UpdateLatestPendingCommand(ctx, p.SessionID, dur, u)
-				if err != nil {
-					return fmt.Errorf("update command: %w", err)
-				}
-				if !quiet && n > 0 {
-					fmt.Fprintf(os.Stderr, "skill-logger: finalized command in %s (%dms, ctx=%d)\n",
-						p.SessionID, dur, u.InputTokens+u.CacheReadTokens+u.CacheCreationTokens)
+				if !quiet && finalized > 0 {
+					fmt.Fprintf(os.Stderr, "skill-logger: finalized %d row(s) in %s (ctx=%d)\n",
+						finalized, p.SessionID, u.InputTokens+u.CacheReadTokens+u.CacheCreationTokens)
 				}
 			}
 			return nil
@@ -194,52 +213,81 @@ exit 0 silently (so it never blocks the hook).`,
 }
 
 // classify inspects the hook payload (plus optional CLI overrides) and decides
-// what record should do. For insert actions it also resolves kind+name.
-func classify(p hookPayload, kindOvr, nameOvr string) (recordAction, store.Kind, string) {
-	switch {
-	case p.HookEventName == "PreToolUse" && p.ToolName == "Skill":
-		var ti skillToolInput
+// what record should do. Returns the list of rows to insert plus an optional
+// finalize action. For Codex sources, UserPromptSubmit prompts are also
+// scanned for `$skill-name` mentions since Codex injects skills via prompt
+// mentions rather than a dedicated Skill tool.
+func classify(p hookPayload, source, kindOvr, nameOvr string) classifyResult {
+	switch p.HookEventName {
+	case "PreToolUse":
+		if p.ToolName != "Skill" {
+			return classifyResult{}
+		}
 		name := nameOvr
 		if name == "" && len(p.ToolInput) > 0 {
+			var ti skillToolInput
 			if err := json.Unmarshal(p.ToolInput, &ti); err == nil {
 				name = ti.Skill
 			}
+		}
+		if name == "" {
+			return classifyResult{}
 		}
 		kind := store.KindSkill
 		if kindOvr != "" {
 			kind = store.Kind(kindOvr)
 		}
-		if name == "" {
-			return actionNone, "", ""
-		}
-		return actionInsertSkill, kind, name
+		return classifyResult{inserts: []insertSpec{{kind: kind, name: name}}}
 
-	case p.HookEventName == "UserPromptSubmit":
+	case "UserPromptSubmit":
 		prompt := strings.TrimSpace(p.Prompt)
-		if !strings.HasPrefix(prompt, "/") && nameOvr == "" {
-			return actionNone, "", ""
-		}
-		name := nameOvr
-		if name == "" {
-			name = strings.SplitN(prompt, " ", 2)[0]
-		}
-		kind := store.KindCommand
-		if kindOvr != "" {
-			kind = store.Kind(kindOvr)
-		}
-		return actionInsertCommand, kind, name
+		var inserts []insertSpec
 
-	case p.HookEventName == "PostToolUse" && p.ToolName == "Skill" && p.ToolUseID != "":
-		return actionFinishSkill, "", ""
+		if strings.HasPrefix(prompt, "/") {
+			name := nameOvr
+			if name == "" {
+				name = strings.SplitN(prompt, " ", 2)[0]
+			}
+			kind := store.KindCommand
+			if kindOvr != "" {
+				kind = store.Kind(kindOvr)
+			}
+			inserts = append(inserts, insertSpec{kind: kind, name: name})
+		}
 
-	case p.HookEventName == "Stop":
-		return actionFinishTurn, "", ""
+		if source == string(store.SourceCodex) {
+			for _, m := range extractCodexMentions(prompt) {
+				kind := store.KindSkill
+				if kindOvr != "" {
+					kind = store.Kind(kindOvr)
+				}
+				inserts = append(inserts, insertSpec{kind: kind, name: m})
+			}
+		}
+
+		if len(inserts) == 0 && nameOvr != "" {
+			kind := store.KindCommand
+			if kindOvr != "" {
+				kind = store.Kind(kindOvr)
+			}
+			inserts = append(inserts, insertSpec{kind: kind, name: nameOvr})
+		}
+		return classifyResult{inserts: inserts}
+
+	case "PostToolUse":
+		if p.ToolName == "Skill" && p.ToolUseID != "" {
+			return classifyResult{finalize: actionFinishSkill}
+		}
+		return classifyResult{}
+
+	case "Stop":
+		return classifyResult{finalize: actionFinishTurn}
 	}
 
 	// Fallback: bare --kind/--name with no recognizable payload still inserts
 	// (preserves previous behavior for ad-hoc CLI use).
 	if kindOvr != "" && nameOvr != "" {
-		return actionInsertSkill, store.Kind(kindOvr), nameOvr
+		return classifyResult{inserts: []insertSpec{{kind: store.Kind(kindOvr), name: nameOvr}}}
 	}
-	return actionNone, "", ""
+	return classifyResult{}
 }

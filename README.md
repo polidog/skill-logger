@@ -100,8 +100,9 @@ slash command 投入を自動で記録できる。`skill-logger` は失敗して
 
 | Hook event | 動作 |
 | --- | --- |
-| `PreToolUse` + `tool_name=Skill` | INSERT `kind=skill`, `name=tool_input.skill` |
+| `PreToolUse` + `tool_name=Skill` | INSERT `kind=skill`, `name=tool_input.skill` (Claude Code のみ) |
 | `UserPromptSubmit` (prompt が `/` 始まり) | INSERT `kind=command`, `name=<最初のトークン>` |
+| `UserPromptSubmit` で `$<name>` mention あり (Codex のみ) | mention ごとに INSERT `kind=skill`, `name=<mention 名>` |
 | `PostToolUse` + `tool_name=Skill` | INSERT した skill 行に `duration_ms` と token usage を書き込み |
 | `Stop` | 同 session の未完了 command 行に `duration_ms` と token usage を書き込み |
 
@@ -113,8 +114,10 @@ slash command 投入を自動で記録できる。`skill-logger` は失敗して
 PostToolUse / Stop の hook を入れ忘れても INSERT は機能する (duration と token は 0 のまま) ので、
 後から段階的に有効化してもよい。
 
-それ以外の payload は無視 (exit 0)。`--source codex` で source 列を切り替えられる
-ので、Codex 側でも同等の hook 仕組みがあれば同じバイナリで併用できる。
+それ以外の payload は無視 (exit 0)。`--source codex` で source 列を切り替えると
+**追加で** Codex 固有の `$<name>` mention を skill として記録する経路が有効になる
+(Codex には Claude Code のような `Skill` ツールが無く、Skill 本文はプロンプトに
+直接注入されるため)。Codex の hook 設定例は下の [Codex の hook 設定](#codex-の-hook-設定) を参照。
 
 ### skill と command の判定について
 
@@ -132,6 +135,61 @@ skill-logger では次のように記録される。
 変わる場合がある (例: `/dev` がプロンプト入力経由なら command として記録される)。
 これは Claude Code 側の挙動をそのまま反映したものなので、skill-logger としては
 両方の経路を別々の利用イベントとして残す方針にしている。
+
+## Codex の hook 設定
+
+Codex CLI も `~/.codex/config.toml` で command 型 hook を登録できる。Codex の
+JSON payload は Claude Code とフィールド名がほぼ一致しているため、同じ
+`skill-logger record` バイナリをそのまま噛ませられる。`--source codex` を
+付けることで、`$skill-name` mention が skill として記録されるようになる。
+
+```toml
+[[hooks.UserPromptSubmit]]
+
+[[hooks.UserPromptSubmit.hooks]]
+type = "command"
+command = "skill-logger record --quiet --source codex"
+
+[[hooks.Stop]]
+
+[[hooks.Stop.hooks]]
+type = "command"
+command = "skill-logger record --quiet --source codex"
+```
+
+| 起動経路 (Codex) | 発火する hook | skill-logger の記録 |
+| --- | --- | --- |
+| TUI で `$skill-name` mention (または `/skills` で選択) | `UserPromptSubmit` | `kind=skill` (mention 1 件につき 1 行) |
+| 組み込み slash command (`/plan` 等) を入力 | `UserPromptSubmit` (発火する場合) | `kind=command` |
+
+Codex には Claude Code のような `Skill` ツールは存在せず、Skill 本文はプロンプト
+コンテキストに直接注入される設計 (cf. `codex-rs/core-skills`)。そのため Codex 側の
+skill 起動は `$skill-name` mention 検出経由で記録される。`PostToolUse Skill` は
+発火しないので、duration / token は **`Stop` hook で turn 終了時にまとめて埋める**
+仕組み (同 session で pending な command + skill 行をすべて finalize する) になっている。
+ターン内に複数 mention があった場合、各行に同じ token usage 値が乗り、duration_ms は
+mention 検出時刻から `Stop` 受信までの実時間が個別に記録される。
+
+非 Codex の prompt 内に偶然 `$word` が現れても skill 化されないよう、mention の
+検出は `--source codex` 指定時のみ有効。`$PATH` / `$HOME` などよくある環境変数も
+スキップされる (Codex 本体と同じ除外リスト)。
+
+### Codex の token usage マッピング
+
+Codex の rollout JSONL (`~/.codex/sessions/rollout-*.jsonl`) には `token_count` イベントが
+記録されており、これを `transcript_path` 経由で読み取って skill-logger の token 列に流し込む。
+Codex は cache の生成/読み込みを区別しないため、以下のように Claude Code の 4 列に正規化する:
+
+| Codex の値 | skill-logger の列 | 備考 |
+| --- | --- | --- |
+| `last_token_usage.input_tokens - cached_input_tokens` | `input_tokens` | 非キャッシュ入力 |
+| `last_token_usage.cached_input_tokens` | `cache_read_tokens` | キャッシュヒット |
+| (Codex に該当概念なし) | `cache_creation_tokens` | 常に 0 |
+| `last_token_usage.output_tokens` | `output_tokens` | reasoning トークン込み |
+
+`stats` / TUI の context 列 (`input + cache_read + cache_creation`) は Codex 値の
+`input_tokens` と一致するので、Claude Code と Codex を混在した集計でも一貫した
+意味で context size を比較できる。
 
 ## 使い方
 

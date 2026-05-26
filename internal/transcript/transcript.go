@@ -1,5 +1,5 @@
-// Package transcript reads Claude Code session transcripts (JSONL) and
-// extracts token usage information so callers can attribute context size to
+// Package transcript reads session transcripts (JSONL) emitted by Claude Code
+// or Codex and extracts token usage so callers can attribute context size to
 // individual hook events.
 package transcript
 
@@ -11,22 +11,20 @@ import (
 	"github.com/polidog/skill-logger/internal/store"
 )
 
-type entry struct {
-	Type    string `json:"type"`
-	Message struct {
-		Usage struct {
-			InputTokens              int64 `json:"input_tokens"`
-			OutputTokens             int64 `json:"output_tokens"`
-			CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
-			CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
-		} `json:"usage"`
-	} `json:"message"`
-}
-
-// LatestUsage scans the transcript JSONL backwards and returns the usage block
-// of the most recent assistant entry. Returns ok=false if the file can't be
-// read or no assistant entry with usage is found.
-func LatestUsage(path string) (store.Usage, bool) {
+// LatestUsage scans the transcript JSONL backwards and returns the most recent
+// usage entry recognizable for the given source ("claude" or "codex"). Returns
+// ok=false when the file can't be read or no usage entry is found.
+//
+// Mappings:
+//   - claude: assistant.message.usage.{input,output,cache_read,cache_creation}_input_tokens
+//   - codex:  event_msg + token_count.info.last_token_usage
+//     (input_tokens, cached_input_tokens, output_tokens). Codex does not
+//     distinguish cache-creation vs cache-read tokens, so cached_input_tokens
+//     is mapped to CacheReadTokens and CacheCreationTokens stays 0. The
+//     non-cached portion (input_tokens - cached_input_tokens) is stored as
+//     InputTokens so that input + cache_read + cache_creation still equals the
+//     full context size — keeping the stats query identity with Claude rows.
+func LatestUsage(path, source string) (store.Usage, bool) {
 	if path == "" {
 		return store.Usage{}, false
 	}
@@ -44,12 +42,32 @@ func LatestUsage(path string) (store.Usage, bool) {
 	for sc.Scan() {
 		lines = append(lines, sc.Text())
 	}
+
+	if source == string(store.SourceCodex) {
+		return latestUsageCodex(lines)
+	}
+	return latestUsageClaude(lines)
+}
+
+type claudeEntry struct {
+	Type    string `json:"type"`
+	Message struct {
+		Usage struct {
+			InputTokens              int64 `json:"input_tokens"`
+			OutputTokens             int64 `json:"output_tokens"`
+			CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
+			CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
+		} `json:"usage"`
+	} `json:"message"`
+}
+
+func latestUsageClaude(lines []string) (store.Usage, bool) {
 	for i := len(lines) - 1; i >= 0; i-- {
 		line := lines[i]
 		if line == "" {
 			continue
 		}
-		var e entry
+		var e claudeEntry
 		if err := json.Unmarshal([]byte(line), &e); err != nil {
 			continue
 		}
@@ -65,6 +83,71 @@ func LatestUsage(path string) (store.Usage, bool) {
 			OutputTokens:        u.OutputTokens,
 			CacheReadTokens:     u.CacheReadInputTokens,
 			CacheCreationTokens: u.CacheCreationInputTokens,
+		}, true
+	}
+	return store.Usage{}, false
+}
+
+// Codex rollout JSONL lines look like:
+//
+//	{"timestamp":"...","type":"event_msg","payload":{"type":"token_count",
+//	 "info":{"total_token_usage":{...},"last_token_usage":{...},...}, ...}}
+//
+// payload.type can be many event variants; we only care about "token_count".
+type codexRolloutLine struct {
+	Type    string          `json:"type"`
+	Payload json.RawMessage `json:"payload"`
+}
+
+type codexTokenCountPayload struct {
+	Type string `json:"type"`
+	Info *struct {
+		LastTokenUsage struct {
+			InputTokens           int64 `json:"input_tokens"`
+			CachedInputTokens     int64 `json:"cached_input_tokens"`
+			OutputTokens          int64 `json:"output_tokens"`
+			ReasoningOutputTokens int64 `json:"reasoning_output_tokens"`
+			TotalTokens           int64 `json:"total_tokens"`
+		} `json:"last_token_usage"`
+	} `json:"info"`
+}
+
+func latestUsageCodex(lines []string) (store.Usage, bool) {
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := lines[i]
+		if line == "" {
+			continue
+		}
+		var rl codexRolloutLine
+		if err := json.Unmarshal([]byte(line), &rl); err != nil {
+			continue
+		}
+		if rl.Type != "event_msg" || len(rl.Payload) == 0 {
+			continue
+		}
+		var tc codexTokenCountPayload
+		if err := json.Unmarshal(rl.Payload, &tc); err != nil {
+			continue
+		}
+		if tc.Type != "token_count" || tc.Info == nil {
+			continue
+		}
+		u := tc.Info.LastTokenUsage
+		if u.InputTokens == 0 && u.OutputTokens == 0 && u.CachedInputTokens == 0 {
+			continue
+		}
+		// Codex's input_tokens is the full input incl. cached portion. Split
+		// it so input + cache_read mirrors Claude's "non-cached input + cache
+		// reads" decomposition. cache_creation has no Codex analogue.
+		nonCached := u.InputTokens - u.CachedInputTokens
+		if nonCached < 0 {
+			nonCached = 0
+		}
+		return store.Usage{
+			InputTokens:         nonCached,
+			OutputTokens:        u.OutputTokens,
+			CacheReadTokens:     u.CachedInputTokens,
+			CacheCreationTokens: 0,
 		}, true
 	}
 	return store.Usage{}, false

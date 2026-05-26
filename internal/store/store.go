@@ -186,9 +186,47 @@ func (s *Store) UpdateBySkillToolUseID(ctx context.Context, toolUseID string, du
 	return res.RowsAffected()
 }
 
-// UpdateLatestPendingCommand fills duration + usage for the most recent
-// command row in the given session that hasn't been completed yet.
-func (s *Store) UpdateLatestPendingCommand(ctx context.Context, sessionID string, durationMs int64, u Usage) (int64, error) {
+type PendingRow struct {
+	ID        int64
+	Kind      Kind
+	Timestamp time.Time
+}
+
+// PendingRows returns every still-pending (duration_ms = 0) command or skill
+// row in the given session, oldest first. Used by the Stop hook to finalize
+// every event that opened during the turn — Codex turns can produce multiple
+// pending skill rows from `$mention` injection, and Claude turns can still
+// have unfinalized commands or skills that PostToolUse never closed.
+func (s *Store) PendingRows(ctx context.Context, sessionID string) ([]PendingRow, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, kind, ts FROM events
+		  WHERE session_id = ? AND duration_ms = 0 AND (kind = 'command' OR kind = 'skill')
+		  ORDER BY id ASC`, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []PendingRow
+	for rows.Next() {
+		var p PendingRow
+		var ts string
+		if err := rows.Scan(&p.ID, &p.Kind, &ts); err != nil {
+			return nil, err
+		}
+		t, perr := time.Parse(time.RFC3339Nano, ts)
+		if perr != nil {
+			t, _ = time.Parse(time.RFC3339, ts)
+		}
+		p.Timestamp = t
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+// FinalizeRow fills duration + usage for the row with the given id, only if
+// it's still pending. Returns the number of rows updated (0 means the row was
+// already finalized — e.g. PostToolUse closed a skill before Stop fired).
+func (s *Store) FinalizeRow(ctx context.Context, id, durationMs int64, u Usage) (int64, error) {
 	res, err := s.db.ExecContext(ctx,
 		`UPDATE events
 		   SET duration_ms = ?,
@@ -196,12 +234,8 @@ func (s *Store) UpdateLatestPendingCommand(ctx context.Context, sessionID string
 		       output_tokens = ?,
 		       cache_read_tokens = ?,
 		       cache_creation_tokens = ?
-		 WHERE id = (
-		   SELECT id FROM events
-		    WHERE session_id = ? AND kind = 'command' AND duration_ms = 0
-		    ORDER BY id DESC LIMIT 1
-		 )`,
-		durationMs, u.InputTokens, u.OutputTokens, u.CacheReadTokens, u.CacheCreationTokens, sessionID,
+		 WHERE id = ? AND duration_ms = 0`,
+		durationMs, u.InputTokens, u.OutputTokens, u.CacheReadTokens, u.CacheCreationTokens, id,
 	)
 	if err != nil {
 		return 0, err
@@ -216,30 +250,6 @@ func (s *Store) StartTime(ctx context.Context, toolUseID string) (time.Time, boo
 	err := s.db.QueryRowContext(ctx,
 		`SELECT ts FROM events WHERE tool_use_id = ? AND kind = 'skill' ORDER BY id DESC LIMIT 1`,
 		toolUseID,
-	).Scan(&ts)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return time.Time{}, false, nil
-		}
-		return time.Time{}, false, err
-	}
-	t, perr := time.Parse(time.RFC3339Nano, ts)
-	if perr != nil {
-		t, perr = time.Parse(time.RFC3339, ts)
-		if perr != nil {
-			return time.Time{}, false, perr
-		}
-	}
-	return t, true, nil
-}
-
-// StartTimeForPendingCommand returns the ts of the latest pending command in
-// the session. Returns ok=false if none.
-func (s *Store) StartTimeForPendingCommand(ctx context.Context, sessionID string) (time.Time, bool, error) {
-	var ts string
-	err := s.db.QueryRowContext(ctx,
-		`SELECT ts FROM events WHERE session_id = ? AND kind = 'command' AND duration_ms = 0 ORDER BY id DESC LIMIT 1`,
-		sessionID,
 	).Scan(&ts)
 	if err != nil {
 		if err == sql.ErrNoRows {
