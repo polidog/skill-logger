@@ -9,28 +9,45 @@ SQLite/Turso に記録し、ターミナル UI で集計を眺めるためのツ
 - `skill-logger stats`  … ランキング / 日次タイムラインを stdout に出す
 - `skill-logger sync`   … Turso embedded replicas を手動同期（ローカル SQLite では no-op）
 
-データは既定で `~/.skill-logger/events.db` に保存される。`SKILL_LOGGER_DIR` で変更可。
+データは既定で `~/.skill-logger/events.db` に保存される。設定は
+`~/.skill-logger/config.toml`（任意）で変更可。
 
 ## インストール
 
-```sh
-go install github.com/polidog/skill-logger@latest
-```
-
-Turso の Embedded Replicas を使いたい場合は CGO を有効にして `turso` ビルドタグ付きで:
+`go-libsql` を内部で使うため CGO が必要:
 
 ```sh
-CGO_ENABLED=1 go install -tags turso github.com/polidog/skill-logger@latest
+CGO_ENABLED=1 go install github.com/polidog/skill-logger@latest
 ```
 
-このビルドで以下の環境変数が設定されていると Turso の Embedded Replica モードで動く:
+## Config (`~/.skill-logger/config.toml`)
 
-| 変数 | 内容 |
-| --- | --- |
-| `TURSO_DATABASE_URL` | `libsql://<db>.turso.io` 形式の primary URL |
-| `TURSO_AUTH_TOKEN` | Turso の auth token |
+config ファイルは **任意** で、無ければローカル SQLite モードで動く。
+Turso の Embedded Replicas を使いたいときだけ作成する。
 
-未設定なら同じバイナリでもローカル `events.db` だけで動く。
+```toml
+# "local" (default) または "turso"
+mode = "turso"
+
+# 省略時は <SKILL_LOGGER_DIR>/events.db (= ~/.skill-logger/events.db)
+db_path = "~/.skill-logger/events.db"
+
+[turso]
+url = "libsql://<your-db>.turso.io"
+auth_token = "..."           # env TURSO_AUTH_TOKEN が優先
+sync_interval = "60s"        # 省略すると手動 sync のみ
+```
+
+設定の優先順位:
+
+| 優先 | ソース | 説明 |
+| --- | --- | --- |
+| 1 | `--db` / `--config` CLI フラグ | コマンド単位で上書き |
+| 2 | 環境変数 (`SKILL_LOGGER_DB`, `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN`) | hook やシェルで一時的に切替 |
+| 3 | `config.toml` | 通常の永続設定 |
+| 4 | デフォルト | mode=local, `~/.skill-logger/events.db` |
+
+`TURSO_DATABASE_URL` がセットされていると、config に `mode` が無くても自動的に turso モードになる。
 
 ## Claude Code の hook 設定
 

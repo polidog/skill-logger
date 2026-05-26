@@ -8,12 +8,14 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/spf13/cobra"
 
+	"github.com/polidog/skill-logger/internal/config"
 	"github.com/polidog/skill-logger/internal/store"
 	"github.com/polidog/skill-logger/internal/tui"
 )
 
 var (
-	flagDBPath string
+	flagDBPath     string
+	flagConfigPath string
 )
 
 func New() *cobra.Command {
@@ -27,11 +29,15 @@ Run "skill-logger" with no arguments to launch the TUI.
 
 Configure your ~/.claude/settings.json hooks so that PreToolUse(Skill) and
 UserPromptSubmit pipe their JSON payload into "skill-logger record" — see the
-README for a copy-pasteable snippet.`,
+README for a copy-pasteable snippet.
+
+Storage backend (local SQLite vs Turso Embedded Replicas) is selected via
+~/.skill-logger/config.toml. See the README for fields.`,
 		SilenceUsage: true,
 		RunE:         runTUI,
 	}
-	root.PersistentFlags().StringVar(&flagDBPath, "db", "", "path to events database (default: $SKILL_LOGGER_DIR/events.db or ~/.skill-logger/events.db)")
+	root.PersistentFlags().StringVar(&flagDBPath, "db", "", "override db_path from config (file path)")
+	root.PersistentFlags().StringVar(&flagConfigPath, "config", "", "path to config.toml (default: $SKILL_LOGGER_CONFIG or ~/.skill-logger/config.toml)")
 
 	root.AddCommand(newRecordCmd())
 	root.AddCommand(newStatsCmd())
@@ -56,21 +62,25 @@ func runTUI(cmd *cobra.Command, args []string) error {
 	return err
 }
 
-func resolveDBPath() (string, error) {
-	if flagDBPath != "" {
-		return flagDBPath, nil
-	}
-	return store.DefaultDBPath()
-}
-
-func openStore(ctx context.Context) (*store.Store, error) {
-	path, err := resolveDBPath()
+func loadConfig() (*config.Config, error) {
+	cfg, err := config.Load(flagConfigPath)
 	if err != nil {
 		return nil, err
 	}
-	s, err := store.Open(ctx, path)
+	if flagDBPath != "" {
+		cfg.DBPath = flagDBPath
+	}
+	return cfg, nil
+}
+
+func openStore(ctx context.Context) (*store.Store, error) {
+	cfg, err := loadConfig()
 	if err != nil {
-		return nil, fmt.Errorf("open %s: %w", path, err)
+		return nil, err
+	}
+	s, err := store.Open(ctx, cfg)
+	if err != nil {
+		return nil, err
 	}
 	if err := s.Migrate(ctx); err != nil {
 		_ = s.Close()

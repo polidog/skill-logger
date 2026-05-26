@@ -3,10 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"time"
 )
 
@@ -275,26 +272,3 @@ func (s *Store) Total(ctx context.Context, f Filter) (int64, error) {
 	return c, nil
 }
 
-func DefaultDir() (string, error) {
-	if v := os.Getenv("SKILL_LOGGER_DIR"); v != "" {
-		return v, nil
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(home, ".skill-logger"), nil
-}
-
-func DefaultDBPath() (string, error) {
-	dir, err := DefaultDir()
-	if err != nil {
-		return "", err
-	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", err
-	}
-	return filepath.Join(dir, "events.db"), nil
-}
-
-var ErrNoTurso = errors.New("turso embedded replicas not enabled in this build (rebuild with -tags turso)")
