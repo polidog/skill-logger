@@ -20,11 +20,12 @@ const (
 	tabSkills tab = iota
 	tabCommands
 	tabProjects
+	tabHosts
 	tabDaily
 	tabRecent
 )
 
-var tabNames = []string{"Skills", "Commands", "Projects", "Daily", "Recent"}
+var tabNames = []string{"Skills", "Commands", "Projects", "Hosts", "Daily", "Recent"}
 
 type rangePreset struct {
 	label string
@@ -53,6 +54,8 @@ type Model struct {
 	tab      tab
 	rangeI   int
 	sourceI  int
+	hostI    int      // 0 = All, 1..N = hosts[i-1]
+	hosts    []string // distinct hosts in DB
 	width    int
 	height   int
 	err      error
@@ -60,12 +63,14 @@ type Model struct {
 	skills   []store.Ranking
 	commands []store.Ranking
 	projects []store.ProjectStat
+	hostStat []store.HostStat
 	daily    []store.DailyPoint
 	recent   []store.Event
 
 	skillTbl   table.Model
 	commandTbl table.Model
 	projectTbl table.Model
+	hostTbl    table.Model
 	recentTbl  table.Model
 }
 
@@ -74,6 +79,7 @@ func New(s *store.Store) Model {
 	m.skillTbl = newRankTable()
 	m.commandTbl = newRankTable()
 	m.projectTbl = newProjectTable()
+	m.hostTbl = newHostTable()
 	m.recentTbl = newRecentTable()
 	return m
 }
@@ -83,6 +89,19 @@ func newRankTable() table.Model {
 		table.WithColumns([]table.Column{
 			{Title: "#", Width: 4},
 			{Title: "Name", Width: 50},
+			{Title: "Count", Width: 8},
+		}),
+		table.WithFocused(true),
+	)
+	t.SetStyles(tableStyles())
+	return t
+}
+
+func newHostTable() table.Model {
+	t := table.New(
+		table.WithColumns([]table.Column{
+			{Title: "#", Width: 4},
+			{Title: "Host", Width: 50},
 			{Title: "Count", Width: 8},
 		}),
 		table.WithFocused(true),
@@ -137,6 +156,8 @@ type dataMsg struct {
 	skills   []store.Ranking
 	commands []store.Ranking
 	projects []store.ProjectStat
+	hostStat []store.HostStat
+	hosts    []string
 	daily    []store.DailyPoint
 	recent   []store.Event
 	err      error
@@ -144,15 +165,23 @@ type dataMsg struct {
 
 func (m Model) Init() tea.Cmd { return m.load() }
 
+func (m Model) currentHost() string {
+	if m.hostI <= 0 || m.hostI > len(m.hosts) {
+		return ""
+	}
+	return m.hosts[m.hostI-1]
+}
+
 func (m Model) load() tea.Cmd {
 	s := m.store
 	since := ranges[m.rangeI].since()
 	src := sources[m.sourceI].value
+	host := m.currentHost()
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		base := func(k store.Kind, limit int) store.Filter {
-			return store.Filter{Source: src, Kind: k, Since: since, Limit: limit}
+			return store.Filter{Source: src, Kind: k, Host: host, Since: since, Limit: limit}
 		}
 		var msg dataMsg
 		var err error
@@ -169,6 +198,14 @@ func (m Model) load() tea.Cmd {
 			return msg
 		}
 		if msg.projects, err = s.ProjectRanking(ctx, base("", 100)); err != nil {
+			msg.err = err
+			return msg
+		}
+		if msg.hostStat, err = s.HostRanking(ctx, base("", 100)); err != nil {
+			msg.err = err
+			return msg
+		}
+		if msg.hosts, err = s.DistinctHosts(ctx); err != nil {
 			msg.err = err
 			return msg
 		}
@@ -211,9 +248,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.tab = tabProjects
 			return m, nil
 		case "4":
-			m.tab = tabDaily
+			m.tab = tabHosts
 			return m, nil
 		case "5":
+			m.tab = tabDaily
+			return m, nil
+		case "6":
 			m.tab = tabRecent
 			return m, nil
 		case "r":
@@ -224,6 +264,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "s":
 			m.sourceI = (m.sourceI + 1) % len(sources)
 			return m, m.load()
+		case "m":
+			if n := len(m.hosts); n > 0 {
+				m.hostI = (m.hostI + 1) % (n + 1)
+				return m, m.load()
+			}
+			return m, nil
 		}
 	case dataMsg:
 		if msg.err != nil {
@@ -235,11 +281,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.skills = msg.skills
 		m.commands = msg.commands
 		m.projects = msg.projects
+		m.hostStat = msg.hostStat
 		m.daily = msg.daily
 		m.recent = msg.recent
+		m.hosts = msg.hosts
+		if m.hostI > len(m.hosts) {
+			m.hostI = 0
+		}
 		m.skillTbl.SetRows(rankRows(m.skills))
 		m.commandTbl.SetRows(rankRows(m.commands))
 		m.projectTbl.SetRows(projectRows(m.projects))
+		m.hostTbl.SetRows(hostRows(m.hostStat))
 		m.recentTbl.SetRows(recentRows(m.recent))
 		return m, nil
 	}
@@ -251,6 +303,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.commandTbl, cmd = m.commandTbl.Update(msg)
 	case tabProjects:
 		m.projectTbl, cmd = m.projectTbl.Update(msg)
+	case tabHosts:
+		m.hostTbl, cmd = m.hostTbl.Update(msg)
 	case tabRecent:
 		m.recentTbl, cmd = m.recentTbl.Update(msg)
 	}
@@ -284,6 +338,11 @@ func (m *Model) resizeTables() {
 		{Title: "Project", Width: rankNameW},
 		{Title: "Count", Width: 8},
 	})
+	m.hostTbl.SetColumns([]table.Column{
+		{Title: "#", Width: 4},
+		{Title: "Host", Width: rankNameW},
+		{Title: "Count", Width: 8},
+	})
 	recentNameW := bodyW - (19 + 6 + 8 + 8)
 	if recentNameW < 10 {
 		recentNameW = 10
@@ -301,6 +360,7 @@ func (m *Model) resizeTables() {
 	m.skillTbl.SetHeight(h)
 	m.commandTbl.SetHeight(h)
 	m.projectTbl.SetHeight(h)
+	m.hostTbl.SetHeight(h)
 	m.recentTbl.SetHeight(h)
 }
 
@@ -319,6 +379,18 @@ func projectRows(ps []store.ProjectStat) []table.Row {
 	rows := make([]table.Row, len(folded))
 	for i, p := range folded {
 		rows[i] = table.Row{fmt.Sprintf("%d", i+1), p.Display, fmt.Sprintf("%d", p.Count)}
+	}
+	return rows
+}
+
+func hostRows(hs []store.HostStat) []table.Row {
+	rows := make([]table.Row, len(hs))
+	for i, h := range hs {
+		name := h.Host
+		if name == "" {
+			name = "(unknown)"
+		}
+		rows[i] = table.Row{fmt.Sprintf("%d", i+1), name, fmt.Sprintf("%d", h.Count)}
 	}
 	return rows
 }
@@ -355,6 +427,14 @@ func (m Model) View() string {
 	b.WriteString(chipStyle.Render("range: " + ranges[m.rangeI].label))
 	b.WriteString(" ")
 	b.WriteString(chipStyle.Render("source: " + sources[m.sourceI].label))
+	b.WriteString(" ")
+	hostLabel := "All"
+	if h := m.currentHost(); h != "" {
+		hostLabel = h
+	} else if m.hostI > 0 {
+		hostLabel = "(unknown)"
+	}
+	b.WriteString(chipStyle.Render("host: " + hostLabel))
 	b.WriteString(" ")
 	b.WriteString(chipStyle.Render(fmt.Sprintf("total: %d", m.total)))
 	b.WriteString("\n")
@@ -393,6 +473,12 @@ func (m Model) View() string {
 			} else {
 				b.WriteString(m.projectTbl.View())
 			}
+		case tabHosts:
+			if len(m.hostStat) == 0 {
+				b.WriteString(subtleStyle.Render("no events yet — see README for hook setup"))
+			} else {
+				b.WriteString(m.hostTbl.View())
+			}
 		case tabDaily:
 			b.WriteString(renderDaily(m.daily, m.width))
 		case tabRecent:
@@ -405,7 +491,7 @@ func (m Model) View() string {
 	}
 
 	b.WriteString("\n")
-	b.WriteString(footerStyle.Render("tab/← → switch · 1-5 jump · r refresh · f range · s source · q quit"))
+	b.WriteString(footerStyle.Render("tab/← → switch · 1-6 jump · r refresh · f range · s source · m host · q quit"))
 	return b.String()
 }
 

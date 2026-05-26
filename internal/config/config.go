@@ -21,9 +21,10 @@ const (
 
 // Config is the on-disk shape of ~/.skill-logger/config.toml.
 type Config struct {
-	Mode   Mode   `toml:"mode"`
-	DBPath string `toml:"db_path"`
-	Turso  Turso  `toml:"turso"`
+	Mode     Mode   `toml:"mode"`
+	DBPath   string `toml:"db_path"`
+	Hostname string `toml:"hostname"`
+	Turso    Turso  `toml:"turso"`
 
 	// Path is the resolved config file path (empty if no file was loaded).
 	Path string `toml:"-"`
@@ -95,6 +96,7 @@ func DefaultPath() (string, error) {
 //
 // Env overrides applied after the file is read:
 //   - SKILL_LOGGER_DB           -> DBPath
+//   - SKILL_LOGGER_HOSTNAME     -> Hostname (overrides os.Hostname() at record time)
 //   - TURSO_DATABASE_URL        -> Turso.URL (also forces Mode=turso if Mode unset)
 //   - TURSO_AUTH_TOKEN          -> Turso.AuthToken
 func Load(path string) (*Config, error) {
@@ -128,11 +130,28 @@ func Load(path string) (*Config, error) {
 	if v := os.Getenv("TURSO_AUTH_TOKEN"); v != "" {
 		cfg.Turso.AuthToken = v
 	}
+	if v := os.Getenv("SKILL_LOGGER_HOSTNAME"); v != "" {
+		cfg.Hostname = v
+	}
 	if cfg.Mode == "" {
 		cfg.Mode = ModeLocal
 	}
 	cfg.DBPath = expand(cfg.DBPath)
 	return cfg, nil
+}
+
+// ResolveHostname returns Config.Hostname when set, otherwise falls back to
+// os.Hostname(). Errors are swallowed and an empty string is returned so the
+// hook never blocks; a `(unknown)` placeholder is the worst case.
+func (c *Config) ResolveHostname() string {
+	if c.Hostname != "" {
+		return c.Hostname
+	}
+	h, err := os.Hostname()
+	if err != nil {
+		return ""
+	}
+	return h
 }
 
 // ResolveDBPath returns the database file path, falling back to <DefaultDir>/events.db.

@@ -33,6 +33,7 @@ func newRecordCmd() *cobra.Command {
 		source  string
 		kindOvr string
 		nameOvr string
+		hostOvr string
 		quiet   bool
 	)
 	cmd := &cobra.Command{
@@ -52,6 +53,15 @@ blocks the hook).`,
 			ctx, cancel := context.WithTimeout(cmd.Context(), 5*time.Second)
 			defer cancel()
 
+			cfg, err := loadConfig()
+			if err != nil {
+				return err
+			}
+			host := hostOvr
+			if host == "" {
+				host = cfg.ResolveHostname()
+			}
+
 			data, err := io.ReadAll(os.Stdin)
 			if err != nil {
 				return fmt.Errorf("read stdin: %w", err)
@@ -61,6 +71,7 @@ blocks the hook).`,
 			ev := store.Event{
 				Source:    store.Source(source),
 				Timestamp: time.Now().UTC(),
+				Host:      host,
 				Raw:       string(data),
 			}
 
@@ -116,6 +127,7 @@ blocks the hook).`,
 	cmd.Flags().StringVar(&source, "source", "claude", "source tool (claude|codex)")
 	cmd.Flags().StringVar(&kindOvr, "kind", "", "override detected kind (skill|command)")
 	cmd.Flags().StringVar(&nameOvr, "name", "", "override detected name")
+	cmd.Flags().StringVar(&hostOvr, "host", "", "override host (default: config.hostname > $SKILL_LOGGER_HOSTNAME > os.Hostname())")
 	cmd.Flags().BoolVarP(&quiet, "quiet", "q", false, "suppress stderr messages")
 	return cmd
 }

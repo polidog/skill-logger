@@ -18,6 +18,7 @@ func newStatsCmd() *cobra.Command {
 	var (
 		kind   string
 		source string
+		host   string
 		since  string
 		limit  int
 		daily  bool
@@ -43,6 +44,7 @@ func newStatsCmd() *cobra.Command {
 			f := store.Filter{
 				Source: store.Source(source),
 				Kind:   store.Kind(kind),
+				Host:   host,
 				Since:  sinceTime,
 				Limit:  limit,
 			}
@@ -87,18 +89,32 @@ func newStatsCmd() *cobra.Command {
 				for i, p := range folded {
 					fmt.Fprintf(tw, "%d\t%s\t%d\n", i+1, p.Display, p.Count)
 				}
+			case "host":
+				hosts, err := s.HostRanking(ctx, f)
+				if err != nil {
+					return err
+				}
+				fmt.Fprintln(tw, "RANK\tHOST\tCOUNT")
+				for i, h := range hosts {
+					name := h.Host
+					if name == "" {
+						name = "(unknown)"
+					}
+					fmt.Fprintf(tw, "%d\t%s\t%d\n", i+1, name, h.Count)
+				}
 			default:
-				return fmt.Errorf("invalid --by %q (use name|project)", by)
+				return fmt.Errorf("invalid --by %q (use name|project|host)", by)
 			}
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&kind, "kind", "", "filter by kind (skill|command)")
 	cmd.Flags().StringVar(&source, "source", "", "filter by source (claude|codex)")
+	cmd.Flags().StringVar(&host, "host", "", "filter by host (machine name recorded with each event)")
 	cmd.Flags().StringVar(&since, "since", "", "filter to events newer than this (e.g. 7d, 24h, 30m, or RFC3339 timestamp)")
 	cmd.Flags().IntVar(&limit, "limit", 20, "max rows to show in ranking")
 	cmd.Flags().BoolVar(&daily, "daily", false, "show a per-day timeline instead of a ranking")
-	cmd.Flags().StringVar(&by, "by", "name", "ranking group: name (skill/command name) or project (cwd)")
+	cmd.Flags().StringVar(&by, "by", "name", "ranking group: name|project|host")
 	return cmd
 }
 
