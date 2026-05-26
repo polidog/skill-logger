@@ -45,6 +45,11 @@ type DailyPoint struct {
 	Count int64
 }
 
+type ProjectStat struct {
+	Cwd   string
+	Count int64
+}
+
 type Store struct {
 	db   *sql.DB
 	sync func() error
@@ -209,6 +214,41 @@ func (s *Store) Recent(ctx context.Context, f Filter) ([]Event, error) {
 		}
 		e.Timestamp = t
 		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) ProjectRanking(ctx context.Context, f Filter) ([]ProjectStat, error) {
+	q := `SELECT cwd, COUNT(*) AS c FROM events WHERE 1=1`
+	var args []any
+	if f.Source != "" {
+		q += ` AND source = ?`
+		args = append(args, string(f.Source))
+	}
+	if f.Kind != "" {
+		q += ` AND kind = ?`
+		args = append(args, string(f.Kind))
+	}
+	if !f.Since.IsZero() {
+		q += ` AND ts >= ?`
+		args = append(args, f.Since.UTC().Format(time.RFC3339Nano))
+	}
+	q += ` GROUP BY cwd ORDER BY c DESC, cwd ASC`
+	if f.Limit > 0 {
+		q += fmt.Sprintf(` LIMIT %d`, f.Limit)
+	}
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ProjectStat
+	for rows.Next() {
+		var p ProjectStat
+		if err := rows.Scan(&p.Cwd, &p.Count); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
 	}
 	return out, rows.Err()
 }

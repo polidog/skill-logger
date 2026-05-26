@@ -10,6 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/polidog/skill-logger/internal/projectname"
 	"github.com/polidog/skill-logger/internal/store"
 )
 
@@ -20,6 +21,7 @@ func newStatsCmd() *cobra.Command {
 		since  string
 		limit  int
 		daily  bool
+		by     string
 	)
 	cmd := &cobra.Command{
 		Use:   "stats",
@@ -60,13 +62,33 @@ func newStatsCmd() *cobra.Command {
 				return nil
 			}
 
-			ranks, err := s.Ranking(ctx, f)
-			if err != nil {
-				return err
-			}
-			fmt.Fprintln(tw, "RANK\tNAME\tCOUNT")
-			for i, r := range ranks {
-				fmt.Fprintf(tw, "%d\t%s\t%d\n", i+1, r.Name, r.Count)
+			switch by {
+			case "", "name":
+				ranks, err := s.Ranking(ctx, f)
+				if err != nil {
+					return err
+				}
+				fmt.Fprintln(tw, "RANK\tNAME\tCOUNT")
+				for i, r := range ranks {
+					fmt.Fprintf(tw, "%d\t%s\t%d\n", i+1, r.Name, r.Count)
+				}
+			case "project", "cwd":
+				projects, err := s.ProjectRanking(ctx, f)
+				if err != nil {
+					return err
+				}
+				folded := projectname.Fold(projects,
+					func(p store.ProjectStat) string { return p.Cwd },
+					func(p store.ProjectStat) int64 { return p.Count })
+				if limit > 0 && len(folded) > limit {
+					folded = folded[:limit]
+				}
+				fmt.Fprintln(tw, "RANK\tPROJECT\tCOUNT")
+				for i, p := range folded {
+					fmt.Fprintf(tw, "%d\t%s\t%d\n", i+1, p.Display, p.Count)
+				}
+			default:
+				return fmt.Errorf("invalid --by %q (use name|project)", by)
 			}
 			return nil
 		},
@@ -76,6 +98,7 @@ func newStatsCmd() *cobra.Command {
 	cmd.Flags().StringVar(&since, "since", "", "filter to events newer than this (e.g. 7d, 24h, 30m, or RFC3339 timestamp)")
 	cmd.Flags().IntVar(&limit, "limit", 20, "max rows to show in ranking")
 	cmd.Flags().BoolVar(&daily, "daily", false, "show a per-day timeline instead of a ranking")
+	cmd.Flags().StringVar(&by, "by", "name", "ranking group: name (skill/command name) or project (cwd)")
 	return cmd
 }
 

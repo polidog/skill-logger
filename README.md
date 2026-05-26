@@ -3,8 +3,8 @@
 Claude Code（および Codex）で使った **Skill** と **slash command** の利用状況を
 SQLite/Turso に記録し、ターミナル UI で集計を眺めるためのツール。
 
-- `skill-logger`        … Bubble Tea 製の TUI で 4 つのビューを切替表示
-  - Skills / Commands / Daily / Recent
+- `skill-logger`        … Bubble Tea 製の TUI で 5 つのビューを切替表示
+  - Skills / Commands / Projects / Daily / Recent
 - `skill-logger record` … hook から渡された JSON を読んで 1 件記録する
 - `skill-logger stats`  … ランキング / 日次タイムラインを stdout に出す
 - `skill-logger sync`   … Turso embedded replicas を手動同期（ローカル SQLite では no-op）
@@ -76,7 +76,7 @@ slash command 投入を自動で記録できる。`skill-logger` は失敗して
 skill-logger
 ```
 
-- `tab` / `←` `→` / `1`–`4`: ビュー切替
+- `tab` / `←` `→` / `1`–`5`: ビュー切替
 - `↑` `↓` または `j` `k`: 行移動
 - `r`: 再読込
 - `f`: 期間切替 (All / 7d / 24h)
@@ -92,9 +92,16 @@ skill-logger stats --kind skill --limit 20
 # 直近 7 日の slash command ランキング
 skill-logger stats --kind command --since 7d
 
+# プロジェクト (cwd) 別ランキング
+skill-logger stats --by project
+
 # 日次タイムライン (全件)
 skill-logger stats --daily
 ```
+
+`--by project` を付けると hook が記録した `cwd` ごとに集計する。表示時に
+`git rev-parse --show-toplevel` を試してリポジトリのルートにまとめ、`$HOME`
+配下は `~` 短縮で表示する (DB は cwd 生値のまま)。
 
 `--since` は `30m` / `24h` / `7d` / `2w` のようなショートハンドか RFC3339 を受け付ける。
 

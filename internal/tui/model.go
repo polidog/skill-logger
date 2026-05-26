@@ -10,6 +10,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/polidog/skill-logger/internal/projectname"
 	"github.com/polidog/skill-logger/internal/store"
 )
 
@@ -18,11 +19,12 @@ type tab int
 const (
 	tabSkills tab = iota
 	tabCommands
+	tabProjects
 	tabDaily
 	tabRecent
 )
 
-var tabNames = []string{"Skills", "Commands", "Daily", "Recent"}
+var tabNames = []string{"Skills", "Commands", "Projects", "Daily", "Recent"}
 
 type rangePreset struct {
 	label string
@@ -57,11 +59,13 @@ type Model struct {
 	total    int64
 	skills   []store.Ranking
 	commands []store.Ranking
+	projects []store.ProjectStat
 	daily    []store.DailyPoint
 	recent   []store.Event
 
 	skillTbl   table.Model
 	commandTbl table.Model
+	projectTbl table.Model
 	recentTbl  table.Model
 }
 
@@ -69,6 +73,7 @@ func New(s *store.Store) Model {
 	m := Model{store: s}
 	m.skillTbl = newRankTable()
 	m.commandTbl = newRankTable()
+	m.projectTbl = newProjectTable()
 	m.recentTbl = newRecentTable()
 	return m
 }
@@ -78,6 +83,19 @@ func newRankTable() table.Model {
 		table.WithColumns([]table.Column{
 			{Title: "#", Width: 4},
 			{Title: "Name", Width: 50},
+			{Title: "Count", Width: 8},
+		}),
+		table.WithFocused(true),
+	)
+	t.SetStyles(tableStyles())
+	return t
+}
+
+func newProjectTable() table.Model {
+	t := table.New(
+		table.WithColumns([]table.Column{
+			{Title: "#", Width: 4},
+			{Title: "Project", Width: 50},
 			{Title: "Count", Width: 8},
 		}),
 		table.WithFocused(true),
@@ -118,6 +136,7 @@ type dataMsg struct {
 	total    int64
 	skills   []store.Ranking
 	commands []store.Ranking
+	projects []store.ProjectStat
 	daily    []store.DailyPoint
 	recent   []store.Event
 	err      error
@@ -146,6 +165,10 @@ func (m Model) load() tea.Cmd {
 			return msg
 		}
 		if msg.commands, err = s.Ranking(ctx, base("command", 100)); err != nil {
+			msg.err = err
+			return msg
+		}
+		if msg.projects, err = s.ProjectRanking(ctx, base("", 100)); err != nil {
 			msg.err = err
 			return msg
 		}
@@ -185,9 +208,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.tab = tabCommands
 			return m, nil
 		case "3":
-			m.tab = tabDaily
+			m.tab = tabProjects
 			return m, nil
 		case "4":
+			m.tab = tabDaily
+			return m, nil
+		case "5":
 			m.tab = tabRecent
 			return m, nil
 		case "r":
@@ -208,10 +234,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.total = msg.total
 		m.skills = msg.skills
 		m.commands = msg.commands
+		m.projects = msg.projects
 		m.daily = msg.daily
 		m.recent = msg.recent
 		m.skillTbl.SetRows(rankRows(m.skills))
 		m.commandTbl.SetRows(rankRows(m.commands))
+		m.projectTbl.SetRows(projectRows(m.projects))
 		m.recentTbl.SetRows(recentRows(m.recent))
 		return m, nil
 	}
@@ -221,6 +249,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.skillTbl, cmd = m.skillTbl.Update(msg)
 	case tabCommands:
 		m.commandTbl, cmd = m.commandTbl.Update(msg)
+	case tabProjects:
+		m.projectTbl, cmd = m.projectTbl.Update(msg)
 	case tabRecent:
 		m.recentTbl, cmd = m.recentTbl.Update(msg)
 	}
@@ -249,6 +279,11 @@ func (m *Model) resizeTables() {
 		{Title: "Name", Width: rankNameW},
 		{Title: "Count", Width: 8},
 	})
+	m.projectTbl.SetColumns([]table.Column{
+		{Title: "#", Width: 4},
+		{Title: "Project", Width: rankNameW},
+		{Title: "Count", Width: 8},
+	})
 	recentNameW := bodyW - (19 + 6 + 8 + 8)
 	if recentNameW < 10 {
 		recentNameW = 10
@@ -265,6 +300,7 @@ func (m *Model) resizeTables() {
 	}
 	m.skillTbl.SetHeight(h)
 	m.commandTbl.SetHeight(h)
+	m.projectTbl.SetHeight(h)
 	m.recentTbl.SetHeight(h)
 }
 
@@ -272,6 +308,17 @@ func rankRows(rs []store.Ranking) []table.Row {
 	rows := make([]table.Row, len(rs))
 	for i, r := range rs {
 		rows[i] = table.Row{fmt.Sprintf("%d", i+1), r.Name, fmt.Sprintf("%d", r.Count)}
+	}
+	return rows
+}
+
+func projectRows(ps []store.ProjectStat) []table.Row {
+	folded := projectname.Fold(ps,
+		func(p store.ProjectStat) string { return p.Cwd },
+		func(p store.ProjectStat) int64 { return p.Count })
+	rows := make([]table.Row, len(folded))
+	for i, p := range folded {
+		rows[i] = table.Row{fmt.Sprintf("%d", i+1), p.Display, fmt.Sprintf("%d", p.Count)}
 	}
 	return rows
 }
@@ -340,6 +387,12 @@ func (m Model) View() string {
 			} else {
 				b.WriteString(m.commandTbl.View())
 			}
+		case tabProjects:
+			if len(m.projects) == 0 {
+				b.WriteString(subtleStyle.Render("no events yet — see README for hook setup"))
+			} else {
+				b.WriteString(m.projectTbl.View())
+			}
 		case tabDaily:
 			b.WriteString(renderDaily(m.daily, m.width))
 		case tabRecent:
@@ -352,7 +405,7 @@ func (m Model) View() string {
 	}
 
 	b.WriteString("\n")
-	b.WriteString(footerStyle.Render("tab/← → switch · 1-4 jump · r refresh · f range · s source · q quit"))
+	b.WriteString(footerStyle.Render("tab/← → switch · 1-5 jump · r refresh · f range · s source · q quit"))
 	return b.String()
 }
 
