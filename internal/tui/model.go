@@ -88,8 +88,10 @@ func newRankTable() table.Model {
 	t := table.New(
 		table.WithColumns([]table.Column{
 			{Title: "#", Width: 4},
-			{Title: "Name", Width: 50},
-			{Title: "Count", Width: 8},
+			{Title: "Name", Width: 36},
+			{Title: "Count", Width: 7},
+			{Title: "Avg Dur", Width: 9},
+			{Title: "Avg Ctx", Width: 9},
 		}),
 		table.WithFocused(true),
 	)
@@ -129,7 +131,9 @@ func newRecentTable() table.Model {
 			{Title: "When", Width: 19},
 			{Title: "Src", Width: 6},
 			{Title: "Kind", Width: 8},
-			{Title: "Name", Width: 50},
+			{Title: "Name", Width: 32},
+			{Title: "Dur", Width: 8},
+			{Title: "Ctx", Width: 8},
 		}),
 		table.WithFocused(true),
 	)
@@ -319,31 +323,42 @@ func (m *Model) resizeTables() {
 	if bodyW < 30 {
 		bodyW = 30
 	}
-	rankNameW := bodyW - (4 + 8 + 6)
-	if rankNameW < 10 {
-		rankNameW = 10
+	// rank tables: #(4) + Count(7) + AvgDur(9) + AvgCtx(9) + spacing(8) = 37 fixed
+	rankNameW := bodyW - (4 + 7 + 9 + 9 + 8)
+	if rankNameW < 12 {
+		rankNameW = 12
 	}
 	m.skillTbl.SetColumns([]table.Column{
 		{Title: "#", Width: 4},
 		{Title: "Name", Width: rankNameW},
-		{Title: "Count", Width: 8},
+		{Title: "Count", Width: 7},
+		{Title: "Avg Dur", Width: 9},
+		{Title: "Avg Ctx", Width: 9},
 	})
 	m.commandTbl.SetColumns([]table.Column{
 		{Title: "#", Width: 4},
 		{Title: "Name", Width: rankNameW},
-		{Title: "Count", Width: 8},
+		{Title: "Count", Width: 7},
+		{Title: "Avg Dur", Width: 9},
+		{Title: "Avg Ctx", Width: 9},
 	})
+	// project/host tables: no extra columns, keep wide name
+	pNameW := bodyW - (4 + 8 + 4)
+	if pNameW < 10 {
+		pNameW = 10
+	}
 	m.projectTbl.SetColumns([]table.Column{
 		{Title: "#", Width: 4},
-		{Title: "Project", Width: rankNameW},
+		{Title: "Project", Width: pNameW},
 		{Title: "Count", Width: 8},
 	})
 	m.hostTbl.SetColumns([]table.Column{
 		{Title: "#", Width: 4},
-		{Title: "Host", Width: rankNameW},
+		{Title: "Host", Width: pNameW},
 		{Title: "Count", Width: 8},
 	})
-	recentNameW := bodyW - (19 + 6 + 8 + 8)
+	// recent table: When(19) + Src(6) + Kind(8) + Dur(8) + Ctx(8) + spacing(10) = 59
+	recentNameW := bodyW - (19 + 6 + 8 + 8 + 8 + 10)
 	if recentNameW < 10 {
 		recentNameW = 10
 	}
@@ -352,6 +367,8 @@ func (m *Model) resizeTables() {
 		{Title: "Src", Width: 6},
 		{Title: "Kind", Width: 8},
 		{Title: "Name", Width: recentNameW},
+		{Title: "Dur", Width: 8},
+		{Title: "Ctx", Width: 8},
 	})
 	h := m.height - 6
 	if h < 5 {
@@ -367,9 +384,50 @@ func (m *Model) resizeTables() {
 func rankRows(rs []store.Ranking) []table.Row {
 	rows := make([]table.Row, len(rs))
 	for i, r := range rs {
-		rows[i] = table.Row{fmt.Sprintf("%d", i+1), r.Name, fmt.Sprintf("%d", r.Count)}
+		rows[i] = table.Row{
+			fmt.Sprintf("%d", i+1),
+			r.Name,
+			fmt.Sprintf("%d", r.Count),
+			fmtDuration(r.AvgDurationMs),
+			fmtTokens(r.AvgContextTokens),
+		}
 	}
 	return rows
+}
+
+func fmtDuration(ms float64) string {
+	if ms <= 0 {
+		return "—"
+	}
+	if ms < 1000 {
+		return fmt.Sprintf("%.0fms", ms)
+	}
+	sec := ms / 1000
+	if sec < 60 {
+		return fmt.Sprintf("%.1fs", sec)
+	}
+	return fmt.Sprintf("%dm%02ds", int(sec)/60, int(sec)%60)
+}
+
+func fmtTokens(n float64) string {
+	if n <= 0 {
+		return "—"
+	}
+	switch {
+	case n >= 1_000_000:
+		return fmt.Sprintf("%.1fM", n/1_000_000)
+	case n >= 1_000:
+		return fmt.Sprintf("%.1fk", n/1_000)
+	}
+	return fmt.Sprintf("%.0f", n)
+}
+
+func fmtDurationMs(ms int64) string {
+	return fmtDuration(float64(ms))
+}
+
+func fmtTokensInt(n int64) string {
+	return fmtTokens(float64(n))
 }
 
 func projectRows(ps []store.ProjectStat) []table.Row {
@@ -398,11 +456,14 @@ func hostRows(hs []store.HostStat) []table.Row {
 func recentRows(es []store.Event) []table.Row {
 	rows := make([]table.Row, len(es))
 	for i, e := range es {
+		ctx := e.InputTokens + e.CacheReadTokens + e.CacheCreationTokens
 		rows[i] = table.Row{
 			e.Timestamp.Local().Format("2006-01-02 15:04:05"),
 			string(e.Source),
 			string(e.Kind),
 			e.Name,
+			fmtDurationMs(e.DurationMs),
+			fmtTokensInt(ctx),
 		}
 	}
 	return rows

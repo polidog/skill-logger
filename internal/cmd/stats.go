@@ -70,9 +70,14 @@ func newStatsCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				fmt.Fprintln(tw, "RANK\tNAME\tCOUNT")
+				fmt.Fprintln(tw, "RANK\tNAME\tCOUNT\tAVG_DUR\tAVG_CTX\tAVG_OUT")
 				for i, r := range ranks {
-					fmt.Fprintf(tw, "%d\t%s\t%d\n", i+1, r.Name, r.Count)
+					fmt.Fprintf(tw, "%d\t%s\t%d\t%s\t%s\t%s\n",
+						i+1, r.Name, r.Count,
+						fmtDuration(r.AvgDurationMs),
+						fmtTokens(r.AvgContextTokens),
+						fmtTokens(r.AvgOutputTokens),
+					)
 				}
 			case "project", "cwd":
 				projects, err := s.ProjectRanking(ctx, f)
@@ -143,6 +148,33 @@ func newVersionCmd() *cobra.Command {
 			fmt.Fprintln(cmd.OutOrStdout(), "skill-logger 0.1.0")
 		},
 	}
+}
+
+func fmtDuration(ms float64) string {
+	if ms <= 0 {
+		return "—"
+	}
+	if ms < 1000 {
+		return fmt.Sprintf("%.0fms", ms)
+	}
+	sec := ms / 1000
+	if sec < 60 {
+		return fmt.Sprintf("%.1fs", sec)
+	}
+	return fmt.Sprintf("%dm%02ds", int(sec)/60, int(sec)%60)
+}
+
+func fmtTokens(n float64) string {
+	if n <= 0 {
+		return "—"
+	}
+	switch {
+	case n >= 1_000_000:
+		return fmt.Sprintf("%.1fM", n/1_000_000)
+	case n >= 1_000:
+		return fmt.Sprintf("%.1fk", n/1_000)
+	}
+	return fmt.Sprintf("%.0f", n)
 }
 
 func parseSince(s string) (time.Time, error) {

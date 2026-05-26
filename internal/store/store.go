@@ -23,20 +23,37 @@ const (
 )
 
 type Event struct {
-	ID        int64
-	Timestamp time.Time
-	Source    Source
-	Kind      Kind
-	Name      string
-	SessionID string
-	Cwd       string
-	Host      string
-	Raw       string
+	ID                  int64
+	Timestamp           time.Time
+	Source              Source
+	Kind                Kind
+	Name                string
+	SessionID           string
+	Cwd                 string
+	Host                string
+	Raw                 string
+	ToolUseID           string
+	DurationMs          int64
+	InputTokens         int64
+	OutputTokens        int64
+	CacheReadTokens     int64
+	CacheCreationTokens int64
+}
+
+type Usage struct {
+	InputTokens         int64
+	OutputTokens        int64
+	CacheReadTokens     int64
+	CacheCreationTokens int64
 }
 
 type Ranking struct {
-	Name  string
-	Count int64
+	Name              string
+	Count             int64
+	AvgDurationMs     float64
+	AvgInputTokens    float64
+	AvgOutputTokens   float64
+	AvgContextTokens  float64
 }
 
 type DailyPoint struct {
@@ -73,32 +90,55 @@ func (s *Store) Sync() error {
 func (s *Store) Migrate(ctx context.Context) error {
 	const schema = `
 CREATE TABLE IF NOT EXISTS events (
-	id         INTEGER PRIMARY KEY AUTOINCREMENT,
-	ts         TEXT NOT NULL,
-	source     TEXT NOT NULL,
-	kind       TEXT NOT NULL,
-	name       TEXT NOT NULL,
-	session_id TEXT NOT NULL DEFAULT '',
-	cwd        TEXT NOT NULL DEFAULT '',
-	host       TEXT NOT NULL DEFAULT '',
-	raw        TEXT NOT NULL DEFAULT ''
+	id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+	ts                    TEXT NOT NULL,
+	source                TEXT NOT NULL,
+	kind                  TEXT NOT NULL,
+	name                  TEXT NOT NULL,
+	session_id            TEXT NOT NULL DEFAULT '',
+	cwd                   TEXT NOT NULL DEFAULT '',
+	host                  TEXT NOT NULL DEFAULT '',
+	raw                   TEXT NOT NULL DEFAULT '',
+	tool_use_id           TEXT NOT NULL DEFAULT '',
+	duration_ms           INTEGER NOT NULL DEFAULT 0,
+	input_tokens          INTEGER NOT NULL DEFAULT 0,
+	output_tokens         INTEGER NOT NULL DEFAULT 0,
+	cache_read_tokens     INTEGER NOT NULL DEFAULT 0,
+	cache_creation_tokens INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
 CREATE INDEX IF NOT EXISTS idx_events_kind_name ON events(kind, name);
 CREATE INDEX IF NOT EXISTS idx_events_source ON events(source);
 CREATE INDEX IF NOT EXISTS idx_events_host ON events(host);
+CREATE INDEX IF NOT EXISTS idx_events_tool_use_id ON events(tool_use_id);
+CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id);
 `
 	if _, err := s.db.ExecContext(ctx, schema); err != nil {
 		return err
 	}
-	// Idempotent ALTER for DBs that pre-date the host column.
-	if _, err := s.db.ExecContext(ctx, `ALTER TABLE events ADD COLUMN host TEXT NOT NULL DEFAULT ''`); err != nil {
-		if !strings.Contains(err.Error(), "duplicate column") {
-			return err
+	for _, alter := range []string{
+		`ALTER TABLE events ADD COLUMN host TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE events ADD COLUMN tool_use_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE events ADD COLUMN duration_ms INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE events ADD COLUMN input_tokens INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE events ADD COLUMN output_tokens INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE events ADD COLUMN cache_read_tokens INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE events ADD COLUMN cache_creation_tokens INTEGER NOT NULL DEFAULT 0`,
+	} {
+		if _, err := s.db.ExecContext(ctx, alter); err != nil {
+			if !strings.Contains(err.Error(), "duplicate column") {
+				return err
+			}
 		}
 	}
-	if _, err := s.db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_events_host ON events(host)`); err != nil {
-		return err
+	for _, idx := range []string{
+		`CREATE INDEX IF NOT EXISTS idx_events_host ON events(host)`,
+		`CREATE INDEX IF NOT EXISTS idx_events_tool_use_id ON events(tool_use_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id)`,
+	} {
+		if _, err := s.db.ExecContext(ctx, idx); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -108,7 +148,7 @@ func (s *Store) Insert(ctx context.Context, e Event) error {
 		e.Timestamp = time.Now().UTC()
 	}
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO events(ts, source, kind, name, session_id, cwd, host, raw) VALUES(?,?,?,?,?,?,?,?)`,
+		`INSERT INTO events(ts, source, kind, name, session_id, cwd, host, raw, tool_use_id, duration_ms, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		e.Timestamp.UTC().Format(time.RFC3339Nano),
 		string(e.Source),
 		string(e.Kind),
@@ -117,8 +157,104 @@ func (s *Store) Insert(ctx context.Context, e Event) error {
 		e.Cwd,
 		e.Host,
 		e.Raw,
+		e.ToolUseID,
+		e.DurationMs,
+		e.InputTokens,
+		e.OutputTokens,
+		e.CacheReadTokens,
+		e.CacheCreationTokens,
 	)
 	return err
+}
+
+// UpdateBySkillToolUseID fills duration + usage for a previously-inserted
+// skill row identified by tool_use_id. Returns the number of rows updated.
+func (s *Store) UpdateBySkillToolUseID(ctx context.Context, toolUseID string, durationMs int64, u Usage) (int64, error) {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE events
+		   SET duration_ms = ?,
+		       input_tokens = ?,
+		       output_tokens = ?,
+		       cache_read_tokens = ?,
+		       cache_creation_tokens = ?
+		 WHERE tool_use_id = ? AND kind = 'skill' AND duration_ms = 0`,
+		durationMs, u.InputTokens, u.OutputTokens, u.CacheReadTokens, u.CacheCreationTokens, toolUseID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+// UpdateLatestPendingCommand fills duration + usage for the most recent
+// command row in the given session that hasn't been completed yet.
+func (s *Store) UpdateLatestPendingCommand(ctx context.Context, sessionID string, durationMs int64, u Usage) (int64, error) {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE events
+		   SET duration_ms = ?,
+		       input_tokens = ?,
+		       output_tokens = ?,
+		       cache_read_tokens = ?,
+		       cache_creation_tokens = ?
+		 WHERE id = (
+		   SELECT id FROM events
+		    WHERE session_id = ? AND kind = 'command' AND duration_ms = 0
+		    ORDER BY id DESC LIMIT 1
+		 )`,
+		durationMs, u.InputTokens, u.OutputTokens, u.CacheReadTokens, u.CacheCreationTokens, sessionID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+// StartTime returns the original timestamp of an event identified by tool_use_id.
+// Used to compute skill duration in record cmd.
+func (s *Store) StartTime(ctx context.Context, toolUseID string) (time.Time, bool, error) {
+	var ts string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT ts FROM events WHERE tool_use_id = ? AND kind = 'skill' ORDER BY id DESC LIMIT 1`,
+		toolUseID,
+	).Scan(&ts)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return time.Time{}, false, nil
+		}
+		return time.Time{}, false, err
+	}
+	t, perr := time.Parse(time.RFC3339Nano, ts)
+	if perr != nil {
+		t, perr = time.Parse(time.RFC3339, ts)
+		if perr != nil {
+			return time.Time{}, false, perr
+		}
+	}
+	return t, true, nil
+}
+
+// StartTimeForPendingCommand returns the ts of the latest pending command in
+// the session. Returns ok=false if none.
+func (s *Store) StartTimeForPendingCommand(ctx context.Context, sessionID string) (time.Time, bool, error) {
+	var ts string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT ts FROM events WHERE session_id = ? AND kind = 'command' AND duration_ms = 0 ORDER BY id DESC LIMIT 1`,
+		sessionID,
+	).Scan(&ts)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return time.Time{}, false, nil
+		}
+		return time.Time{}, false, err
+	}
+	t, perr := time.Parse(time.RFC3339Nano, ts)
+	if perr != nil {
+		t, perr = time.Parse(time.RFC3339, ts)
+		if perr != nil {
+			return time.Time{}, false, perr
+		}
+	}
+	return t, true, nil
 }
 
 type Filter struct {
@@ -152,7 +288,14 @@ func applyFilter(q string, f Filter, args []any) (string, []any) {
 }
 
 func (s *Store) Ranking(ctx context.Context, f Filter) ([]Ranking, error) {
-	q, args := applyFilter(`SELECT name, COUNT(*) AS c FROM events WHERE 1=1`, f, nil)
+	q, args := applyFilter(`SELECT name,
+		COUNT(*) AS c,
+		AVG(CASE WHEN duration_ms > 0 THEN duration_ms END) AS avg_dur,
+		AVG(CASE WHEN input_tokens > 0 THEN input_tokens END) AS avg_in,
+		AVG(CASE WHEN output_tokens > 0 THEN output_tokens END) AS avg_out,
+		AVG(CASE WHEN (input_tokens + cache_read_tokens + cache_creation_tokens) > 0
+		         THEN (input_tokens + cache_read_tokens + cache_creation_tokens) END) AS avg_ctx
+		FROM events WHERE 1=1`, f, nil)
 	q += ` GROUP BY name ORDER BY c DESC, name ASC`
 	if f.Limit > 0 {
 		q += fmt.Sprintf(` LIMIT %d`, f.Limit)
@@ -165,9 +308,14 @@ func (s *Store) Ranking(ctx context.Context, f Filter) ([]Ranking, error) {
 	var out []Ranking
 	for rows.Next() {
 		var r Ranking
-		if err := rows.Scan(&r.Name, &r.Count); err != nil {
+		var avgDur, avgIn, avgOut, avgCtx sql.NullFloat64
+		if err := rows.Scan(&r.Name, &r.Count, &avgDur, &avgIn, &avgOut, &avgCtx); err != nil {
 			return nil, err
 		}
+		r.AvgDurationMs = avgDur.Float64
+		r.AvgInputTokens = avgIn.Float64
+		r.AvgOutputTokens = avgOut.Float64
+		r.AvgContextTokens = avgCtx.Float64
 		out = append(out, r)
 	}
 	return out, rows.Err()
@@ -193,7 +341,7 @@ func (s *Store) Daily(ctx context.Context, f Filter) ([]DailyPoint, error) {
 }
 
 func (s *Store) Recent(ctx context.Context, f Filter) ([]Event, error) {
-	q, args := applyFilter(`SELECT id, ts, source, kind, name, session_id, cwd, host, raw FROM events WHERE 1=1`, f, nil)
+	q, args := applyFilter(`SELECT id, ts, source, kind, name, session_id, cwd, host, raw, tool_use_id, duration_ms, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens FROM events WHERE 1=1`, f, nil)
 	q += ` ORDER BY id DESC`
 	if f.Limit > 0 {
 		q += fmt.Sprintf(` LIMIT %d`, f.Limit)
@@ -207,7 +355,8 @@ func (s *Store) Recent(ctx context.Context, f Filter) ([]Event, error) {
 	for rows.Next() {
 		var e Event
 		var ts string
-		if err := rows.Scan(&e.ID, &ts, &e.Source, &e.Kind, &e.Name, &e.SessionID, &e.Cwd, &e.Host, &e.Raw); err != nil {
+		if err := rows.Scan(&e.ID, &ts, &e.Source, &e.Kind, &e.Name, &e.SessionID, &e.Cwd, &e.Host, &e.Raw,
+			&e.ToolUseID, &e.DurationMs, &e.InputTokens, &e.OutputTokens, &e.CacheReadTokens, &e.CacheCreationTokens); err != nil {
 			return nil, err
 		}
 		t, perr := time.Parse(time.RFC3339Nano, ts)

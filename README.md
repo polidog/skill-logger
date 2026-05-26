@@ -70,7 +70,22 @@ slash command 投入を自動で記録できる。`skill-logger` は失敗して
         ]
       }
     ],
+    "PostToolUse": [
+      {
+        "matcher": "Skill",
+        "hooks": [
+          { "type": "command", "command": "skill-logger record --quiet" }
+        ]
+      }
+    ],
     "UserPromptSubmit": [
+      {
+        "hooks": [
+          { "type": "command", "command": "skill-logger record --quiet" }
+        ]
+      }
+    ],
+    "Stop": [
       {
         "hooks": [
           { "type": "command", "command": "skill-logger record --quiet" }
@@ -83,8 +98,20 @@ slash command 投入を自動で記録できる。`skill-logger` は失敗して
 
 `skill-logger record` は stdin の JSON を見て自動的に種別を判定する:
 
-- `PreToolUse` + `tool_name=Skill` → `kind=skill`, `name=tool_input.skill`
-- `UserPromptSubmit` で `prompt` が `/` で始まる → `kind=command`, `name=<最初のトークン>`
+| Hook event | 動作 |
+| --- | --- |
+| `PreToolUse` + `tool_name=Skill` | INSERT `kind=skill`, `name=tool_input.skill` |
+| `UserPromptSubmit` (prompt が `/` 始まり) | INSERT `kind=command`, `name=<最初のトークン>` |
+| `PostToolUse` + `tool_name=Skill` | INSERT した skill 行に `duration_ms` と token usage を書き込み |
+| `Stop` | 同 session の未完了 command 行に `duration_ms` と token usage を書き込み |
+
+`duration_ms` は INSERT から finalize までのウォールタイム (ミリ秒)。token usage は
+`transcript_path` で渡される JSONL の最新 assistant メッセージから
+`input_tokens` / `cache_read_input_tokens` / `cache_creation_input_tokens`
+/ `output_tokens` を抽出する。
+
+PostToolUse / Stop の hook を入れ忘れても INSERT は機能する (duration と token は 0 のまま) ので、
+後から段階的に有効化してもよい。
 
 それ以外の payload は無視 (exit 0)。`--source codex` で source 列を切り替えられる
 ので、Codex 側でも同等の hook 仕組みがあれば同じバイナリで併用できる。
@@ -159,17 +186,26 @@ hostname を入れておくと混ざらない。
 
 ```sql
 CREATE TABLE events (
-  id         INTEGER PRIMARY KEY AUTOINCREMENT,
-  ts         TEXT NOT NULL,       -- RFC3339Nano (UTC)
-  source     TEXT NOT NULL,       -- claude | codex
-  kind       TEXT NOT NULL,       -- skill | command
-  name       TEXT NOT NULL,
-  session_id TEXT NOT NULL DEFAULT '',
-  cwd        TEXT NOT NULL DEFAULT '',
-  host       TEXT NOT NULL DEFAULT '',  -- 記録端末 (config.hostname > $SKILL_LOGGER_HOSTNAME > os.Hostname())
-  raw        TEXT NOT NULL DEFAULT ''  -- 元の hook JSON (デバッグ用)
+  id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts                    TEXT NOT NULL,       -- RFC3339Nano (UTC) — INSERT 時刻
+  source                TEXT NOT NULL,       -- claude | codex
+  kind                  TEXT NOT NULL,       -- skill | command
+  name                  TEXT NOT NULL,
+  session_id            TEXT NOT NULL DEFAULT '',
+  cwd                   TEXT NOT NULL DEFAULT '',
+  host                  TEXT NOT NULL DEFAULT '',
+  raw                   TEXT NOT NULL DEFAULT '',  -- 元の hook JSON
+  tool_use_id           TEXT NOT NULL DEFAULT '',  -- skill の PreToolUse→PostToolUse 対応用
+  duration_ms           INTEGER NOT NULL DEFAULT 0,  -- INSERT→finalize の経過 ms (0 = 未確定)
+  input_tokens          INTEGER NOT NULL DEFAULT 0,  -- 以下 transcript の最新 usage
+  output_tokens         INTEGER NOT NULL DEFAULT 0,
+  cache_read_tokens     INTEGER NOT NULL DEFAULT 0,
+  cache_creation_tokens INTEGER NOT NULL DEFAULT 0
 );
 ```
+
+旧スキーマは起動時に冪等な `ALTER TABLE` で自動マイグレーションされる。
+コンテキスト総入力量は `input_tokens + cache_read_tokens + cache_creation_tokens` で算出可能。
 
 ## ライセンス
 
