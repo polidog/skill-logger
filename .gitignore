@@ -1,0 +1,6 @@
+/skill-logger
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+.DS_Store
