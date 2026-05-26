@@ -31,6 +31,7 @@ type Event struct {
 	SessionID           string
 	Cwd                 string
 	Host                string
+	User                string
 	Raw                 string
 	ToolUseID           string
 	DurationMs          int64
@@ -71,6 +72,11 @@ type HostStat struct {
 	Count int64
 }
 
+type UserStat struct {
+	User  string
+	Count int64
+}
+
 type Store struct {
 	db   *sql.DB
 	sync func() error
@@ -98,6 +104,7 @@ CREATE TABLE IF NOT EXISTS events (
 	session_id            TEXT NOT NULL DEFAULT '',
 	cwd                   TEXT NOT NULL DEFAULT '',
 	host                  TEXT NOT NULL DEFAULT '',
+	"user"                TEXT NOT NULL DEFAULT '',
 	raw                   TEXT NOT NULL DEFAULT '',
 	tool_use_id           TEXT NOT NULL DEFAULT '',
 	duration_ms           INTEGER NOT NULL DEFAULT 0,
@@ -110,6 +117,7 @@ CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
 CREATE INDEX IF NOT EXISTS idx_events_kind_name ON events(kind, name);
 CREATE INDEX IF NOT EXISTS idx_events_source ON events(source);
 CREATE INDEX IF NOT EXISTS idx_events_host ON events(host);
+CREATE INDEX IF NOT EXISTS idx_events_user ON events("user");
 CREATE INDEX IF NOT EXISTS idx_events_tool_use_id ON events(tool_use_id);
 CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id);
 `
@@ -118,6 +126,7 @@ CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id);
 	}
 	for _, alter := range []string{
 		`ALTER TABLE events ADD COLUMN host TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE events ADD COLUMN "user" TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE events ADD COLUMN tool_use_id TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE events ADD COLUMN duration_ms INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE events ADD COLUMN input_tokens INTEGER NOT NULL DEFAULT 0`,
@@ -133,6 +142,7 @@ CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id);
 	}
 	for _, idx := range []string{
 		`CREATE INDEX IF NOT EXISTS idx_events_host ON events(host)`,
+		`CREATE INDEX IF NOT EXISTS idx_events_user ON events("user")`,
 		`CREATE INDEX IF NOT EXISTS idx_events_tool_use_id ON events(tool_use_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id)`,
 	} {
@@ -148,7 +158,7 @@ func (s *Store) Insert(ctx context.Context, e Event) error {
 		e.Timestamp = time.Now().UTC()
 	}
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO events(ts, source, kind, name, session_id, cwd, host, raw, tool_use_id, duration_ms, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		`INSERT INTO events(ts, source, kind, name, session_id, cwd, host, "user", raw, tool_use_id, duration_ms, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		e.Timestamp.UTC().Format(time.RFC3339Nano),
 		string(e.Source),
 		string(e.Kind),
@@ -156,6 +166,7 @@ func (s *Store) Insert(ctx context.Context, e Event) error {
 		e.SessionID,
 		e.Cwd,
 		e.Host,
+		e.User,
 		e.Raw,
 		e.ToolUseID,
 		e.DurationMs,
@@ -271,6 +282,7 @@ type Filter struct {
 	Source Source
 	Kind   Kind
 	Host   string
+	User   string
 	Since  time.Time
 	Limit  int
 }
@@ -289,6 +301,10 @@ func applyFilter(q string, f Filter, args []any) (string, []any) {
 	if f.Host != "" {
 		q += ` AND host = ?`
 		args = append(args, f.Host)
+	}
+	if f.User != "" {
+		q += ` AND "user" = ?`
+		args = append(args, f.User)
 	}
 	if !f.Since.IsZero() {
 		q += ` AND ts >= ?`
@@ -351,7 +367,7 @@ func (s *Store) Daily(ctx context.Context, f Filter) ([]DailyPoint, error) {
 }
 
 func (s *Store) Recent(ctx context.Context, f Filter) ([]Event, error) {
-	q, args := applyFilter(`SELECT id, ts, source, kind, name, session_id, cwd, host, raw, tool_use_id, duration_ms, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens FROM events WHERE 1=1`, f, nil)
+	q, args := applyFilter(`SELECT id, ts, source, kind, name, session_id, cwd, host, "user", raw, tool_use_id, duration_ms, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens FROM events WHERE 1=1`, f, nil)
 	q += ` ORDER BY id DESC`
 	if f.Limit > 0 {
 		q += fmt.Sprintf(` LIMIT %d`, f.Limit)
@@ -365,7 +381,7 @@ func (s *Store) Recent(ctx context.Context, f Filter) ([]Event, error) {
 	for rows.Next() {
 		var e Event
 		var ts string
-		if err := rows.Scan(&e.ID, &ts, &e.Source, &e.Kind, &e.Name, &e.SessionID, &e.Cwd, &e.Host, &e.Raw,
+		if err := rows.Scan(&e.ID, &ts, &e.Source, &e.Kind, &e.Name, &e.SessionID, &e.Cwd, &e.Host, &e.User, &e.Raw,
 			&e.ToolUseID, &e.DurationMs, &e.InputTokens, &e.OutputTokens, &e.CacheReadTokens, &e.CacheCreationTokens); err != nil {
 			return nil, err
 		}
@@ -440,6 +456,49 @@ func (s *Store) DistinctHosts(ctx context.Context) ([]string, error) {
 			return nil, err
 		}
 		out = append(out, h)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) UserRanking(ctx context.Context, f Filter) ([]UserStat, error) {
+	q, args := applyFilter(`SELECT "user", COUNT(*) AS c FROM events WHERE 1=1`, f, nil)
+	q += ` GROUP BY "user" ORDER BY c DESC, "user" ASC`
+	if f.Limit > 0 {
+		q += fmt.Sprintf(` LIMIT %d`, f.Limit)
+	}
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []UserStat
+	for rows.Next() {
+		var u UserStat
+		if err := rows.Scan(&u.User, &u.Count); err != nil {
+			return nil, err
+		}
+		out = append(out, u)
+	}
+	return out, rows.Err()
+}
+
+// DistinctUsers returns all distinct user values present in the database. Same
+// rationale as DistinctHosts: used by the TUI to keep the user filter picker
+// stable across other filter toggles.
+func (s *Store) DistinctUsers(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT "user" FROM events GROUP BY "user" ORDER BY COUNT(*) DESC, "user" ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var u string
+		if err := rows.Scan(&u); err != nil {
+			return nil, err
+		}
+		out = append(out, u)
 	}
 	return out, rows.Err()
 }

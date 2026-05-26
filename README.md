@@ -3,8 +3,8 @@
 Claude Code（および Codex）で使った **Skill** と **slash command** の利用状況を
 SQLite/Turso に記録し、ターミナル UI で集計を眺めるためのツール。
 
-- `skill-logger`        … Bubble Tea 製の TUI で 6 つのビューを切替表示
-  - Skills / Commands / Projects / Hosts / Daily / Recent
+- `skill-logger`        … Bubble Tea 製の TUI で 7 つのビューを切替表示
+  - Skills / Commands / Projects / Hosts / Users / Daily / Recent
 - `skill-logger record` … hook から渡された JSON を読んで 1 件記録する
 - `skill-logger stats`  … ランキング / 日次タイムラインを stdout に出す
 - `skill-logger sync`   … Turso embedded replicas を手動同期（ローカル SQLite では no-op）
@@ -68,6 +68,14 @@ db_path = "~/.skill-logger/events.db"
 # どの端末で記録されたか判別するのに使う。省略すると os.Hostname() が入る。
 hostname = "macbook-work"
 
+# 個人を識別するラベル (チーム共有時の集計キー)。省略すると
+# `git config --get user.email` の値が入る。匿名にしたいなら ""。
+user = "polidog@example.com"
+
+# 共有 DB に prompt 全文 (raw 列) を含めるかどうか。デフォルト true。
+# チーム共有 Turso では false にして prompt を伏せるのが安全。
+share_raw = false
+
 [turso]
 url = "libsql://<your-db>.turso.io"
 auth_token = "..."           # env TURSO_AUTH_TOKEN が優先
@@ -78,12 +86,80 @@ sync_interval = "60s"        # 省略すると手動 sync のみ
 
 | 優先 | ソース | 説明 |
 | --- | --- | --- |
-| 1 | `--db` / `--config` CLI フラグ | コマンド単位で上書き |
-| 2 | 環境変数 (`SKILL_LOGGER_DB`, `SKILL_LOGGER_HOSTNAME`, `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN`) | hook やシェルで一時的に切替 |
+| 1 | `--db` / `--config` / `--user` / `--host` CLI フラグ | コマンド単位で上書き |
+| 2 | 環境変数 (`SKILL_LOGGER_DB`, `SKILL_LOGGER_HOSTNAME`, `SKILL_LOGGER_USER`, `SKILL_LOGGER_SHARE_RAW`, `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN`) | hook やシェルで一時的に切替 |
 | 3 | `config.toml` | 通常の永続設定 |
-| 4 | デフォルト | mode=local, `~/.skill-logger/events.db` |
+| 4 | デフォルト | mode=local, `~/.skill-logger/events.db`, user=`git config user.email`, share_raw=true |
 
 `TURSO_DATABASE_URL` がセットされていると、config に `mode` が無くても自動的に turso モードになる。
+
+## チームで共有して使う
+
+Turso の Embedded Replica を team 全員で 1 つの DB に向ければ、誰がどの skill を
+よく使っているか、最近チーム内で流行り始めた skill は何か、といったことを
+集計できる。最低限以下の 3 つの仕組みが用意されている:
+
+### 1. `user` 列で個人を識別
+
+`host` (= 端末名) だけだと「同一人物の複数端末」と「別人」を区別できないので、
+`user` 列も別途記録している。値の解決順は **`--user` フラグ → `SKILL_LOGGER_USER`
+→ `config.toml` の `user` → `git config --get user.email`**。何も無ければ空文字で
+匿名イベントになる。
+
+```toml
+# ~/.skill-logger/config.toml
+user = "alice@example.com"
+```
+
+### 2. `share_raw = false` で prompt を伏せる
+
+`raw` 列には hook が受け取った JSON 全文 (= ユーザーの prompt 含む) が入る。
+ローカル運用ならデバッグに便利だが、共有 Turso に流すと他メンバーから prompt が
+見えてしまう。`share_raw = false` をセットしておけば record 時に raw を空文字で
+保存するので、共有 DB には kind / name / duration / token のメタデータだけが
+残る。
+
+```toml
+share_raw = false
+```
+
+過去に取った raw を後から削除したい場合は `sqlite3 events.db "UPDATE events SET raw=''"`
+など手動で消す必要がある (今のところ purge コマンドは用意していない)。
+
+### 3. `--by user` / `--user <addr>` でチーム集計
+
+```sh
+# チーム全体で誰が一番多く skill を呼んでいるか
+skill-logger stats --by user
+
+# 自分の skill ランキング (絞り込み)
+skill-logger stats --user alice@example.com --kind skill
+
+# 直近 7 日でチーム内で最も使われた command
+skill-logger stats --kind command --since 7d
+```
+
+TUI には Users ビュー (`5` キー) と user フィルタ chip (`u` キーで巡回) が追加
+されていて、Host と同じ感覚で個人軸の集計を眺められる。
+
+### 推奨セットアップ (チーム共有)
+
+各メンバーの `~/.skill-logger/config.toml`:
+
+```toml
+mode = "turso"
+hostname = "alice-macbook"
+user = "alice@example.com"   # 省略しても git の user.email が拾われる
+share_raw = false             # チーム共有時はオフを推奨
+
+[turso]
+url = "libsql://team-skill-logger.turso.io"
+auth_token = "..."            # 全員が同じ DB の token を持つ
+sync_interval = "60s"
+```
+
+`hook` 設定は `skill-logger init --write` で各自セットアップ。あとは記録が
+自動で Turso に流れて、`stats --by user` や TUI で誰でも集計を眺められる。
 
 ## Claude Code の hook 設定
 
@@ -231,12 +307,13 @@ Codex は cache の生成/読み込みを区別しないため、以下のよう
 skill-logger
 ```
 
-- `tab` / `←` `→` / `1`–`6`: ビュー切替
+- `tab` / `←` `→` / `1`–`7`: ビュー切替
 - `↑` `↓` または `j` `k`: 行移動
 - `r`: 再読込
 - `f`: 期間切替 (All / 7d / 24h)
 - `s`: source 切替 (All / Claude / Codex)
 - `m`: host 切替 (All / 各端末)
+- `u`: user 切替 (All / 各メンバー)
 - `q` または `Ctrl+C`: 終了
 
 ### CLI 集計
@@ -283,8 +360,9 @@ CREATE TABLE events (
   name                  TEXT NOT NULL,
   session_id            TEXT NOT NULL DEFAULT '',
   cwd                   TEXT NOT NULL DEFAULT '',
-  host                  TEXT NOT NULL DEFAULT '',
-  raw                   TEXT NOT NULL DEFAULT '',  -- 元の hook JSON
+  host                  TEXT NOT NULL DEFAULT '',  -- 端末名
+  "user"                TEXT NOT NULL DEFAULT '',  -- 個人識別子 (デフォルトは git config user.email)
+  raw                   TEXT NOT NULL DEFAULT '',  -- 元の hook JSON (share_raw=false で空に)
   tool_use_id           TEXT NOT NULL DEFAULT '',  -- skill の PreToolUse→PostToolUse 対応用
   duration_ms           INTEGER NOT NULL DEFAULT 0,  -- INSERT→finalize の経過 ms (0 = 未確定)
   input_tokens          INTEGER NOT NULL DEFAULT 0,  -- 以下 transcript の最新 usage

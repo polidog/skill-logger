@@ -21,11 +21,12 @@ const (
 	tabCommands
 	tabProjects
 	tabHosts
+	tabUsers
 	tabDaily
 	tabRecent
 )
 
-var tabNames = []string{"Skills", "Commands", "Projects", "Hosts", "Daily", "Recent"}
+var tabNames = []string{"Skills", "Commands", "Projects", "Hosts", "Users", "Daily", "Recent"}
 
 type rangePreset struct {
 	label string
@@ -56,6 +57,8 @@ type Model struct {
 	sourceI  int
 	hostI    int      // 0 = All, 1..N = hosts[i-1]
 	hosts    []string // distinct hosts in DB
+	userI    int      // 0 = All, 1..N = users[i-1]
+	users    []string // distinct users in DB
 	width    int
 	height   int
 	err      error
@@ -64,6 +67,7 @@ type Model struct {
 	commands []store.Ranking
 	projects []store.ProjectStat
 	hostStat []store.HostStat
+	userStat []store.UserStat
 	daily    []store.DailyPoint
 	recent   []store.Event
 
@@ -71,6 +75,7 @@ type Model struct {
 	commandTbl table.Model
 	projectTbl table.Model
 	hostTbl    table.Model
+	userTbl    table.Model
 	recentTbl  table.Model
 }
 
@@ -80,6 +85,7 @@ func New(s *store.Store) Model {
 	m.commandTbl = newRankTable()
 	m.projectTbl = newProjectTable()
 	m.hostTbl = newHostTable()
+	m.userTbl = newUserTable()
 	m.recentTbl = newRecentTable()
 	return m
 }
@@ -104,6 +110,19 @@ func newHostTable() table.Model {
 		table.WithColumns([]table.Column{
 			{Title: "#", Width: 4},
 			{Title: "Host", Width: 50},
+			{Title: "Count", Width: 8},
+		}),
+		table.WithFocused(true),
+	)
+	t.SetStyles(tableStyles())
+	return t
+}
+
+func newUserTable() table.Model {
+	t := table.New(
+		table.WithColumns([]table.Column{
+			{Title: "#", Width: 4},
+			{Title: "User", Width: 50},
 			{Title: "Count", Width: 8},
 		}),
 		table.WithFocused(true),
@@ -161,7 +180,9 @@ type dataMsg struct {
 	commands []store.Ranking
 	projects []store.ProjectStat
 	hostStat []store.HostStat
+	userStat []store.UserStat
 	hosts    []string
+	users    []string
 	daily    []store.DailyPoint
 	recent   []store.Event
 	err      error
@@ -176,16 +197,24 @@ func (m Model) currentHost() string {
 	return m.hosts[m.hostI-1]
 }
 
+func (m Model) currentUser() string {
+	if m.userI <= 0 || m.userI > len(m.users) {
+		return ""
+	}
+	return m.users[m.userI-1]
+}
+
 func (m Model) load() tea.Cmd {
 	s := m.store
 	since := ranges[m.rangeI].since()
 	src := sources[m.sourceI].value
 	host := m.currentHost()
+	user := m.currentUser()
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		base := func(k store.Kind, limit int) store.Filter {
-			return store.Filter{Source: src, Kind: k, Host: host, Since: since, Limit: limit}
+			return store.Filter{Source: src, Kind: k, Host: host, User: user, Since: since, Limit: limit}
 		}
 		var msg dataMsg
 		var err error
@@ -209,7 +238,15 @@ func (m Model) load() tea.Cmd {
 			msg.err = err
 			return msg
 		}
+		if msg.userStat, err = s.UserRanking(ctx, base("", 100)); err != nil {
+			msg.err = err
+			return msg
+		}
 		if msg.hosts, err = s.DistinctHosts(ctx); err != nil {
+			msg.err = err
+			return msg
+		}
+		if msg.users, err = s.DistinctUsers(ctx); err != nil {
 			msg.err = err
 			return msg
 		}
@@ -255,9 +292,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.tab = tabHosts
 			return m, nil
 		case "5":
-			m.tab = tabDaily
+			m.tab = tabUsers
 			return m, nil
 		case "6":
+			m.tab = tabDaily
+			return m, nil
+		case "7":
 			m.tab = tabRecent
 			return m, nil
 		case "r":
@@ -274,6 +314,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, m.load()
 			}
 			return m, nil
+		case "u":
+			if n := len(m.users); n > 0 {
+				m.userI = (m.userI + 1) % (n + 1)
+				return m, m.load()
+			}
+			return m, nil
 		}
 	case dataMsg:
 		if msg.err != nil {
@@ -286,16 +332,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.commands = msg.commands
 		m.projects = msg.projects
 		m.hostStat = msg.hostStat
+		m.userStat = msg.userStat
 		m.daily = msg.daily
 		m.recent = msg.recent
 		m.hosts = msg.hosts
+		m.users = msg.users
 		if m.hostI > len(m.hosts) {
 			m.hostI = 0
+		}
+		if m.userI > len(m.users) {
+			m.userI = 0
 		}
 		m.skillTbl.SetRows(rankRows(m.skills))
 		m.commandTbl.SetRows(rankRows(m.commands))
 		m.projectTbl.SetRows(projectRows(m.projects))
 		m.hostTbl.SetRows(hostRows(m.hostStat))
+		m.userTbl.SetRows(userRows(m.userStat))
 		m.recentTbl.SetRows(recentRows(m.recent))
 		return m, nil
 	}
@@ -309,6 +361,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.projectTbl, cmd = m.projectTbl.Update(msg)
 	case tabHosts:
 		m.hostTbl, cmd = m.hostTbl.Update(msg)
+	case tabUsers:
+		m.userTbl, cmd = m.userTbl.Update(msg)
 	case tabRecent:
 		m.recentTbl, cmd = m.recentTbl.Update(msg)
 	}
@@ -357,6 +411,11 @@ func (m *Model) resizeTables() {
 		{Title: "Host", Width: pNameW},
 		{Title: "Count", Width: 8},
 	})
+	m.userTbl.SetColumns([]table.Column{
+		{Title: "#", Width: 4},
+		{Title: "User", Width: pNameW},
+		{Title: "Count", Width: 8},
+	})
 	// recent table: When(19) + Src(6) + Kind(8) + Dur(8) + Ctx(8) + spacing(10) = 59
 	recentNameW := bodyW - (19 + 6 + 8 + 8 + 8 + 10)
 	if recentNameW < 10 {
@@ -378,6 +437,7 @@ func (m *Model) resizeTables() {
 	m.commandTbl.SetHeight(h)
 	m.projectTbl.SetHeight(h)
 	m.hostTbl.SetHeight(h)
+	m.userTbl.SetHeight(h)
 	m.recentTbl.SetHeight(h)
 }
 
@@ -453,6 +513,18 @@ func hostRows(hs []store.HostStat) []table.Row {
 	return rows
 }
 
+func userRows(us []store.UserStat) []table.Row {
+	rows := make([]table.Row, len(us))
+	for i, u := range us {
+		name := u.User
+		if name == "" {
+			name = "(anonymous)"
+		}
+		rows[i] = table.Row{fmt.Sprintf("%d", i+1), name, fmt.Sprintf("%d", u.Count)}
+	}
+	return rows
+}
+
 func recentRows(es []store.Event) []table.Row {
 	rows := make([]table.Row, len(es))
 	for i, e := range es {
@@ -497,6 +569,14 @@ func (m Model) View() string {
 	}
 	b.WriteString(chipStyle.Render("host: " + hostLabel))
 	b.WriteString(" ")
+	userLabel := "All"
+	if u := m.currentUser(); u != "" {
+		userLabel = u
+	} else if m.userI > 0 {
+		userLabel = "(anonymous)"
+	}
+	b.WriteString(chipStyle.Render("user: " + userLabel))
+	b.WriteString(" ")
 	b.WriteString(chipStyle.Render(fmt.Sprintf("total: %d", m.total)))
 	b.WriteString("\n")
 
@@ -540,6 +620,12 @@ func (m Model) View() string {
 			} else {
 				b.WriteString(m.hostTbl.View())
 			}
+		case tabUsers:
+			if len(m.userStat) == 0 {
+				b.WriteString(subtleStyle.Render("no events yet — see README for hook setup"))
+			} else {
+				b.WriteString(m.userTbl.View())
+			}
 		case tabDaily:
 			b.WriteString(renderDaily(m.daily, m.width))
 		case tabRecent:
@@ -552,7 +638,7 @@ func (m Model) View() string {
 	}
 
 	b.WriteString("\n")
-	b.WriteString(footerStyle.Render("tab/← → switch · 1-6 jump · r refresh · f range · s source · m host · q quit"))
+	b.WriteString(footerStyle.Render("tab/← → switch · 1-7 jump · r refresh · f range · s source · m host · u user · q quit"))
 	return b.String()
 }
 

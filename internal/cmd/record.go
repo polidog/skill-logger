@@ -55,6 +55,7 @@ func newRecordCmd() *cobra.Command {
 		kindOvr string
 		nameOvr string
 		hostOvr string
+		userOvr string
 		quiet   bool
 	)
 	cmd := &cobra.Command{
@@ -92,6 +93,10 @@ exit 0 silently (so it never blocks the hook).`,
 			if host == "" {
 				host = cfg.ResolveHostname()
 			}
+			user := userOvr
+			if user == "" {
+				user = cfg.ResolveUser()
+			}
 
 			data, err := io.ReadAll(os.Stdin)
 			if err != nil {
@@ -128,12 +133,18 @@ exit 0 silently (so it never blocks the hook).`,
 				}
 			}
 
+			rawPayload := ""
+			if cfg.ShouldShareRaw() {
+				rawPayload = string(data)
+			}
+
 			for _, item := range res.inserts {
 				ev := store.Event{
 					Source:    store.Source(source),
 					Timestamp: payloadTS,
 					Host:      host,
-					Raw:       string(data),
+					User:      user,
+					Raw:       rawPayload,
 					SessionID: p.SessionID,
 					Cwd:       p.Cwd,
 					Kind:      item.kind,
@@ -208,6 +219,7 @@ exit 0 silently (so it never blocks the hook).`,
 	cmd.Flags().StringVar(&kindOvr, "kind", "", "override detected kind (skill|command)")
 	cmd.Flags().StringVar(&nameOvr, "name", "", "override detected name")
 	cmd.Flags().StringVar(&hostOvr, "host", "", "override host (default: config.hostname > $SKILL_LOGGER_HOSTNAME > os.Hostname())")
+	cmd.Flags().StringVar(&userOvr, "user", "", "override user (default: config.user > $SKILL_LOGGER_USER > git config user.email)")
 	cmd.Flags().BoolVarP(&quiet, "quiet", "q", false, "suppress stderr messages")
 	return cmd
 }

@@ -4,7 +4,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -24,7 +26,13 @@ type Config struct {
 	Mode     Mode   `toml:"mode"`
 	DBPath   string `toml:"db_path"`
 	Hostname string `toml:"hostname"`
-	Turso    Turso  `toml:"turso"`
+	User     string `toml:"user"`
+	// ShareRaw controls whether the raw hook JSON is stored alongside each
+	// event. Default (nil) is true for backwards compatibility. Set to false
+	// in config.toml when writing to a shared Turso DB so prompts aren't
+	// exposed to other team members.
+	ShareRaw *bool `toml:"share_raw"`
+	Turso    Turso `toml:"turso"`
 
 	// Path is the resolved config file path (empty if no file was loaded).
 	Path string `toml:"-"`
@@ -133,6 +141,14 @@ func Load(path string) (*Config, error) {
 	if v := os.Getenv("SKILL_LOGGER_HOSTNAME"); v != "" {
 		cfg.Hostname = v
 	}
+	if v := os.Getenv("SKILL_LOGGER_USER"); v != "" {
+		cfg.User = v
+	}
+	if v := os.Getenv("SKILL_LOGGER_SHARE_RAW"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			cfg.ShareRaw = &b
+		}
+	}
 	if cfg.Mode == "" {
 		cfg.Mode = ModeLocal
 	}
@@ -152,6 +168,30 @@ func (c *Config) ResolveHostname() string {
 		return ""
 	}
 	return h
+}
+
+// ResolveUser returns Config.User when set, otherwise falls back to
+// `git config user.email`. Errors are swallowed so the hook never blocks; an
+// empty string just means the event is anonymous (still attributed via host).
+func (c *Config) ResolveUser() string {
+	if c.User != "" {
+		return c.User
+	}
+	out, err := exec.Command("git", "config", "--get", "user.email").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// ShouldShareRaw returns true if the raw hook JSON should be persisted with
+// each event. Default (nil ShareRaw) is true; set ShareRaw=false explicitly
+// in config.toml to strip prompts before they hit a shared Turso DB.
+func (c *Config) ShouldShareRaw() bool {
+	if c.ShareRaw == nil {
+		return true
+	}
+	return *c.ShareRaw
 }
 
 // ResolveDBPath returns the database file path, falling back to <DefaultDir>/events.db.
