@@ -43,6 +43,7 @@ Storage backend (local SQLite vs Turso Embedded Replicas) is selected via
 	root.AddCommand(newStatsCmd())
 	root.AddCommand(newSyncCmd())
 	root.AddCommand(newVersionCmd())
+	root.AddCommand(newInitCmd())
 	return root
 }
 

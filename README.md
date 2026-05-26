@@ -20,6 +20,38 @@ SQLite/Turso に記録し、ターミナル UI で集計を眺めるためのツ
 CGO_ENABLED=1 go install github.com/polidog/skill-logger@latest
 ```
 
+## クイックスタート: hook 設定の自動セットアップ
+
+`skill-logger init` で Claude Code (`~/.claude/settings.json`) と Codex
+(`~/.codex/config.toml`) 両方の hook 設定を一発で入れられる。**既存の設定は
+上書きせずマージする** (skill-logger 由来エントリが無ければ追加、あれば何もしない
+ので idempotent)。
+
+```sh
+# 推奨スニペットを stdout に表示するだけ (安全側のデフォルト)
+skill-logger init
+
+# 実際にファイルへ反映 (両方)
+skill-logger init --write
+
+# Claude だけ / Codex だけ
+skill-logger init --target claude --write
+skill-logger init --target codex  --write
+
+# パスを上書きしたい場合
+skill-logger init --write \
+  --claude-settings ~/my-claude/settings.json \
+  --codex-config   ~/my-codex/config.toml
+```
+
+`--write` は既存ファイルをパースして hook 配列に skill-logger エントリを **追加** する。
+既に `skill-logger record` を含むコマンドがそのイベントに登録されていればスキップ
+するので、何度実行しても重複しない。
+
+注意: 書き込み時にファイルを再シリアライズするため、JSON のキー順や TOML の
+コメントは保持されない場合がある。先に `skill-logger init` (引数なし) で
+スニペットを確認し、手動編集の方が安心なときは copy & paste しても良い。
+
 ## Config (`~/.skill-logger/config.toml`)
 
 config ファイルは **任意** で、無ければローカル SQLite モードで動く。
