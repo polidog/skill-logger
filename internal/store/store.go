@@ -49,12 +49,12 @@ type Usage struct {
 }
 
 type Ranking struct {
-	Name              string
-	Count             int64
-	AvgDurationMs     float64
-	AvgInputTokens    float64
-	AvgOutputTokens   float64
-	AvgContextTokens  float64
+	Name             string
+	Count            int64
+	AvgDurationMs    float64
+	AvgInputTokens   float64
+	AvgOutputTokens  float64
+	AvgContextTokens float64
 }
 
 type DailyPoint struct {
@@ -511,4 +511,3 @@ func (s *Store) Total(ctx context.Context, f Filter) (int64, error) {
 	}
 	return c, nil
 }
-

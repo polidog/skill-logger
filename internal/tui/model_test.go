@@ -115,11 +115,11 @@ func TestRecentRowsRenders(t *testing.T) {
 	ts := time.Date(2026, 5, 1, 12, 30, 0, 0, time.UTC)
 	es := []store.Event{
 		{
-			Timestamp: ts,
-			Source:    store.SourceCodex,
-			Kind:      store.KindSkill,
-			Name:      "verify",
-			DurationMs: 2500,
+			Timestamp:   ts,
+			Source:      store.SourceCodex,
+			Kind:        store.KindSkill,
+			Name:        "verify",
+			DurationMs:  2500,
 			InputTokens: 100, CacheReadTokens: 200, CacheCreationTokens: 50,
 		},
 	}
