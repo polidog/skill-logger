@@ -94,8 +94,10 @@ func (s *Store) Sync() error {
 }
 
 func (s *Store) Migrate(ctx context.Context) error {
-	const schema = `
-CREATE TABLE IF NOT EXISTS events (
+	// Turso (libSQL Hrana) rejects multi-statement Exec, so each DDL must run
+	// as its own ExecContext call.
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS events (
 	id                    INTEGER PRIMARY KEY AUTOINCREMENT,
 	ts                    TEXT NOT NULL,
 	source                TEXT NOT NULL,
@@ -112,17 +114,19 @@ CREATE TABLE IF NOT EXISTS events (
 	output_tokens         INTEGER NOT NULL DEFAULT 0,
 	cache_read_tokens     INTEGER NOT NULL DEFAULT 0,
 	cache_creation_tokens INTEGER NOT NULL DEFAULT 0
-);
-CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
-CREATE INDEX IF NOT EXISTS idx_events_kind_name ON events(kind, name);
-CREATE INDEX IF NOT EXISTS idx_events_source ON events(source);
-CREATE INDEX IF NOT EXISTS idx_events_host ON events(host);
-CREATE INDEX IF NOT EXISTS idx_events_user ON events("user");
-CREATE INDEX IF NOT EXISTS idx_events_tool_use_id ON events(tool_use_id);
-CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id);
-`
-	if _, err := s.db.ExecContext(ctx, schema); err != nil {
-		return err
+)`,
+		`CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts)`,
+		`CREATE INDEX IF NOT EXISTS idx_events_kind_name ON events(kind, name)`,
+		`CREATE INDEX IF NOT EXISTS idx_events_source ON events(source)`,
+		`CREATE INDEX IF NOT EXISTS idx_events_host ON events(host)`,
+		`CREATE INDEX IF NOT EXISTS idx_events_user ON events("user")`,
+		`CREATE INDEX IF NOT EXISTS idx_events_tool_use_id ON events(tool_use_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id)`,
+	}
+	for _, stmt := range stmts {
+		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
+			return err
+		}
 	}
 	for _, alter := range []string{
 		`ALTER TABLE events ADD COLUMN host TEXT NOT NULL DEFAULT ''`,
