@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"strings"
 	"time"
 )
 
@@ -94,10 +93,20 @@ func (s *Store) Sync() error {
 }
 
 func (s *Store) Migrate(ctx context.Context) error {
-	// Turso (libSQL Hrana) rejects multi-statement Exec, so each DDL must run
-	// as its own ExecContext call.
-	stmts := []string{
-		`CREATE TABLE IF NOT EXISTS events (
+	// Run all DDL in a single transaction. Turso's embedded replica pushes a
+	// transaction's WAL frames atomically, so wrapping avoids the
+	// "WAL frame insert conflict" we'd hit when each Exec ran as its own
+	// implicit write transaction. SQLite has no "ADD COLUMN IF NOT EXISTS",
+	// so we read PRAGMA table_info first and skip ALTERs whose columns
+	// already exist (instead of catching a "duplicate column" error, which
+	// would abort the surrounding tx).
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS events (
 	id                    INTEGER PRIMARY KEY AUTOINCREMENT,
 	ts                    TEXT NOT NULL,
 	source                TEXT NOT NULL,
@@ -114,7 +123,33 @@ func (s *Store) Migrate(ctx context.Context) error {
 	output_tokens         INTEGER NOT NULL DEFAULT 0,
 	cache_read_tokens     INTEGER NOT NULL DEFAULT 0,
 	cache_creation_tokens INTEGER NOT NULL DEFAULT 0
-)`,
+)`); err != nil {
+		return err
+	}
+
+	have, err := existingEventColumns(ctx, tx)
+	if err != nil {
+		return err
+	}
+	for _, a := range []struct{ col, ddl string }{
+		{"host", `ALTER TABLE events ADD COLUMN host TEXT NOT NULL DEFAULT ''`},
+		{"user", `ALTER TABLE events ADD COLUMN "user" TEXT NOT NULL DEFAULT ''`},
+		{"tool_use_id", `ALTER TABLE events ADD COLUMN tool_use_id TEXT NOT NULL DEFAULT ''`},
+		{"duration_ms", `ALTER TABLE events ADD COLUMN duration_ms INTEGER NOT NULL DEFAULT 0`},
+		{"input_tokens", `ALTER TABLE events ADD COLUMN input_tokens INTEGER NOT NULL DEFAULT 0`},
+		{"output_tokens", `ALTER TABLE events ADD COLUMN output_tokens INTEGER NOT NULL DEFAULT 0`},
+		{"cache_read_tokens", `ALTER TABLE events ADD COLUMN cache_read_tokens INTEGER NOT NULL DEFAULT 0`},
+		{"cache_creation_tokens", `ALTER TABLE events ADD COLUMN cache_creation_tokens INTEGER NOT NULL DEFAULT 0`},
+	} {
+		if have[a.col] {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, a.ddl); err != nil {
+			return err
+		}
+	}
+
+	for _, idx := range []string{
 		`CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts)`,
 		`CREATE INDEX IF NOT EXISTS idx_events_kind_name ON events(kind, name)`,
 		`CREATE INDEX IF NOT EXISTS idx_events_source ON events(source)`,
@@ -122,39 +157,37 @@ func (s *Store) Migrate(ctx context.Context) error {
 		`CREATE INDEX IF NOT EXISTS idx_events_user ON events("user")`,
 		`CREATE INDEX IF NOT EXISTS idx_events_tool_use_id ON events(tool_use_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id)`,
-	}
-	for _, stmt := range stmts {
-		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
+	} {
+		if _, err := tx.ExecContext(ctx, idx); err != nil {
 			return err
 		}
 	}
-	for _, alter := range []string{
-		`ALTER TABLE events ADD COLUMN host TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE events ADD COLUMN "user" TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE events ADD COLUMN tool_use_id TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE events ADD COLUMN duration_ms INTEGER NOT NULL DEFAULT 0`,
-		`ALTER TABLE events ADD COLUMN input_tokens INTEGER NOT NULL DEFAULT 0`,
-		`ALTER TABLE events ADD COLUMN output_tokens INTEGER NOT NULL DEFAULT 0`,
-		`ALTER TABLE events ADD COLUMN cache_read_tokens INTEGER NOT NULL DEFAULT 0`,
-		`ALTER TABLE events ADD COLUMN cache_creation_tokens INTEGER NOT NULL DEFAULT 0`,
-	} {
-		if _, err := s.db.ExecContext(ctx, alter); err != nil {
-			if !strings.Contains(err.Error(), "duplicate column") {
-				return err
-			}
-		}
+
+	return tx.Commit()
+}
+
+func existingEventColumns(ctx context.Context, tx *sql.Tx) (map[string]bool, error) {
+	rows, err := tx.QueryContext(ctx, `PRAGMA table_info(events)`)
+	if err != nil {
+		return nil, err
 	}
-	for _, idx := range []string{
-		`CREATE INDEX IF NOT EXISTS idx_events_host ON events(host)`,
-		`CREATE INDEX IF NOT EXISTS idx_events_user ON events("user")`,
-		`CREATE INDEX IF NOT EXISTS idx_events_tool_use_id ON events(tool_use_id)`,
-		`CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id)`,
-	} {
-		if _, err := s.db.ExecContext(ctx, idx); err != nil {
-			return err
+	defer rows.Close()
+	cols := map[string]bool{}
+	for rows.Next() {
+		var (
+			cid     int
+			name    string
+			ctype   string
+			notnull int
+			dflt    sql.NullString
+			pk      int
+		)
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			return nil, err
 		}
+		cols[name] = true
 	}
-	return nil
+	return cols, rows.Err()
 }
 
 func (s *Store) Insert(ctx context.Context, e Event) error {
