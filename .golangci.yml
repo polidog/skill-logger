@@ -17,12 +17,15 @@ linters:
     misspell:
       locale: US
     errcheck:
-      # io.Closer.Close and fmt.Fprint* are conventionally unchecked.
+      # Close() and fmt.Fprint* are conventionally unchecked. errcheck only
+      # matches the *static* type of the receiver, so we have to list both
+      # the io.Closer interface and the concrete types we actually defer on.
       exclude-functions:
         - (io.Closer).Close
         - (*database/sql.Rows).Close
         - (*os.File).Close
         - (*text/tabwriter.Writer).Flush
+        - (*github.com/polidog/skill-logger/internal/store.Store).Close
         - fmt.Fprintf
         - fmt.Fprintln
         - fmt.Fprint
