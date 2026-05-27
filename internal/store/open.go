@@ -60,7 +60,9 @@ func openTurso(ctx context.Context, cfg *config.Config, path string) (*Store, er
 		return nil, err
 	}
 	return &Store{
-		db:   db,
-		sync: func() error { _, err := connector.Sync(); return err },
+		db: db,
+		// go-libsql's Sync is deprecated in favor of a future tursogo package,
+		// but tursogo isn't released yet — migrate once it lands.
+		sync: func() error { _, err := connector.Sync(); return err }, //nolint:staticcheck
 	}, nil
 }
