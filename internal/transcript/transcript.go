@@ -138,7 +138,7 @@ func latestUsageCodex(lines []string) (store.Usage, bool) {
 		}
 		// Codex's input_tokens is the full input incl. cached portion. Split
 		// it so input + cache_read mirrors Claude's "non-cached input + cache
-		// reads" decomposition. cache_creation has no Codex analogue.
+		// reads" decomposition. cache_creation has no Codex analog.
 		nonCached := u.InputTokens - u.CachedInputTokens
 		if nonCached < 0 {
 			nonCached = 0

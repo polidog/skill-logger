@@ -16,6 +16,16 @@ linters:
   settings:
     misspell:
       locale: US
+    errcheck:
+      # io.Closer.Close and fmt.Fprint* are conventionally unchecked.
+      exclude-functions:
+        - (io.Closer).Close
+        - (*database/sql.Rows).Close
+        - (*os.File).Close
+        - (*text/tabwriter.Writer).Flush
+        - fmt.Fprintf
+        - fmt.Fprintln
+        - fmt.Fprint
 
   exclusions:
     rules:
