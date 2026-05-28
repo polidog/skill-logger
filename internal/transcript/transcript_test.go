@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/polidog/skill-logger/internal/store"
+	"github.com/polidog/agent-tracer/internal/store"
 )
 
 func writeLines(t *testing.T, name string, lines ...string) string {

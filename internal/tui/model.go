@@ -10,8 +10,8 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/polidog/skill-logger/internal/projectname"
-	"github.com/polidog/skill-logger/internal/store"
+	"github.com/polidog/agent-tracer/internal/projectname"
+	"github.com/polidog/agent-tracer/internal/store"
 )
 
 type tab int
@@ -19,6 +19,7 @@ type tab int
 const (
 	tabSkills tab = iota
 	tabCommands
+	tabMCP
 	tabProjects
 	tabHosts
 	tabUsers
@@ -26,7 +27,7 @@ const (
 	tabRecent
 )
 
-var tabNames = []string{"Skills", "Commands", "Projects", "Hosts", "Users", "Daily", "Recent"}
+var tabNames = []string{"Skills", "Commands", "MCP", "Projects", "Hosts", "Users", "Daily", "Recent"}
 
 type rangePreset struct {
 	label string
@@ -65,6 +66,7 @@ type Model struct {
 	total    int64
 	skills   []store.Ranking
 	commands []store.Ranking
+	mcp      []store.Ranking
 	projects []store.ProjectStat
 	hostStat []store.HostStat
 	userStat []store.UserStat
@@ -73,6 +75,7 @@ type Model struct {
 
 	skillTbl   table.Model
 	commandTbl table.Model
+	mcpTbl     table.Model
 	projectTbl table.Model
 	hostTbl    table.Model
 	userTbl    table.Model
@@ -83,6 +86,7 @@ func New(s *store.Store) Model {
 	m := Model{store: s}
 	m.skillTbl = newRankTable()
 	m.commandTbl = newRankTable()
+	m.mcpTbl = newRankTable()
 	m.projectTbl = newProjectTable()
 	m.hostTbl = newHostTable()
 	m.userTbl = newUserTable()
@@ -178,6 +182,7 @@ type dataMsg struct {
 	total    int64
 	skills   []store.Ranking
 	commands []store.Ranking
+	mcp      []store.Ranking
 	projects []store.ProjectStat
 	hostStat []store.HostStat
 	userStat []store.UserStat
@@ -227,6 +232,10 @@ func (m Model) load() tea.Cmd {
 			return msg
 		}
 		if msg.commands, err = s.Ranking(ctx, base("command", 100)); err != nil {
+			msg.err = err
+			return msg
+		}
+		if msg.mcp, err = s.Ranking(ctx, base("mcp", 100)); err != nil {
 			msg.err = err
 			return msg
 		}
@@ -286,18 +295,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.tab = tabCommands
 			return m, nil
 		case "3":
-			m.tab = tabProjects
+			m.tab = tabMCP
 			return m, nil
 		case "4":
-			m.tab = tabHosts
+			m.tab = tabProjects
 			return m, nil
 		case "5":
-			m.tab = tabUsers
+			m.tab = tabHosts
 			return m, nil
 		case "6":
-			m.tab = tabDaily
+			m.tab = tabUsers
 			return m, nil
 		case "7":
+			m.tab = tabDaily
+			return m, nil
+		case "8":
 			m.tab = tabRecent
 			return m, nil
 		case "r":
@@ -330,6 +342,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.total = msg.total
 		m.skills = msg.skills
 		m.commands = msg.commands
+		m.mcp = msg.mcp
 		m.projects = msg.projects
 		m.hostStat = msg.hostStat
 		m.userStat = msg.userStat
@@ -345,6 +358,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.skillTbl.SetRows(rankRows(m.skills))
 		m.commandTbl.SetRows(rankRows(m.commands))
+		m.mcpTbl.SetRows(rankRows(m.mcp))
 		m.projectTbl.SetRows(projectRows(m.projects))
 		m.hostTbl.SetRows(hostRows(m.hostStat))
 		m.userTbl.SetRows(userRows(m.userStat))
@@ -357,6 +371,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.skillTbl, cmd = m.skillTbl.Update(msg)
 	case tabCommands:
 		m.commandTbl, cmd = m.commandTbl.Update(msg)
+	case tabMCP:
+		m.mcpTbl, cmd = m.mcpTbl.Update(msg)
 	case tabProjects:
 		m.projectTbl, cmd = m.projectTbl.Update(msg)
 	case tabHosts:
@@ -390,6 +406,13 @@ func (m *Model) resizeTables() {
 		{Title: "Avg Ctx", Width: 9},
 	})
 	m.commandTbl.SetColumns([]table.Column{
+		{Title: "#", Width: 4},
+		{Title: "Name", Width: rankNameW},
+		{Title: "Count", Width: 7},
+		{Title: "Avg Dur", Width: 9},
+		{Title: "Avg Ctx", Width: 9},
+	})
+	m.mcpTbl.SetColumns([]table.Column{
 		{Title: "#", Width: 4},
 		{Title: "Name", Width: rankNameW},
 		{Title: "Count", Width: 7},
@@ -435,6 +458,7 @@ func (m *Model) resizeTables() {
 	}
 	m.skillTbl.SetHeight(h)
 	m.commandTbl.SetHeight(h)
+	m.mcpTbl.SetHeight(h)
 	m.projectTbl.SetHeight(h)
 	m.hostTbl.SetHeight(h)
 	m.userTbl.SetHeight(h)
@@ -555,7 +579,7 @@ var (
 func (m Model) View() string {
 	var b strings.Builder
 
-	b.WriteString(titleStyle.Render("skill-logger"))
+	b.WriteString(titleStyle.Render("agent-tracer"))
 	b.WriteString("  ")
 	b.WriteString(chipStyle.Render("range: " + ranges[m.rangeI].label))
 	b.WriteString(" ")
@@ -608,6 +632,12 @@ func (m Model) View() string {
 			} else {
 				b.WriteString(m.commandTbl.View())
 			}
+		case tabMCP:
+			if len(m.mcp) == 0 {
+				b.WriteString(subtleStyle.Render("no MCP tool events yet — see README for hook setup"))
+			} else {
+				b.WriteString(m.mcpTbl.View())
+			}
 		case tabProjects:
 			if len(m.projects) == 0 {
 				b.WriteString(subtleStyle.Render("no events yet — see README for hook setup"))
@@ -638,7 +668,7 @@ func (m Model) View() string {
 	}
 
 	b.WriteString("\n")
-	b.WriteString(footerStyle.Render("tab/← → switch · 1-7 jump · r refresh · f range · s source · m host · u user · q quit"))
+	b.WriteString(footerStyle.Render("tab/← → switch · 1-8 jump · r refresh · f range · s source · m host · u user · q quit"))
 	return b.String()
 }
 

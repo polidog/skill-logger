@@ -26,7 +26,7 @@ linters:
         - (*database/sql.Tx).Rollback
         - (*os.File).Close
         - (*text/tabwriter.Writer).Flush
-        - (*github.com/polidog/skill-logger/internal/store.Store).Close
+        - (*github.com/polidog/agent-tracer/internal/store.Store).Close
         - fmt.Fprintf
         - fmt.Fprintln
         - fmt.Fprint

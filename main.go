@@ -1,5 +1,5 @@
 package main
 
-import "github.com/polidog/skill-logger/internal/cmd"
+import "github.com/polidog/agent-tracer/internal/cmd"
 
 func main() { cmd.Execute() }

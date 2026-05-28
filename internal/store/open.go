@@ -7,7 +7,7 @@ import (
 
 	"github.com/tursodatabase/go-libsql"
 
-	"github.com/polidog/skill-logger/internal/config"
+	"github.com/polidog/agent-tracer/internal/config"
 )
 
 // Open opens the events database according to cfg. Mode=local opens a plain

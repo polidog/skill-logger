@@ -8,12 +8,7 @@ import (
 )
 
 func TestLoadMissingFileReturnsDefaults(t *testing.T) {
-	t.Setenv("SKILL_LOGGER_DB", "")
-	t.Setenv("SKILL_LOGGER_HOSTNAME", "")
-	t.Setenv("SKILL_LOGGER_USER", "")
-	t.Setenv("SKILL_LOGGER_SHARE_RAW", "")
-	t.Setenv("TURSO_DATABASE_URL", "")
-	t.Setenv("TURSO_AUTH_TOKEN", "")
+	clearEnvVars(t)
 
 	dir := t.TempDir()
 	cfg, err := Load(filepath.Join(dir, "missing.toml"))
@@ -35,12 +30,7 @@ func TestLoadMissingFileReturnsDefaults(t *testing.T) {
 }
 
 func TestLoadReadsFile(t *testing.T) {
-	t.Setenv("SKILL_LOGGER_DB", "")
-	t.Setenv("SKILL_LOGGER_HOSTNAME", "")
-	t.Setenv("SKILL_LOGGER_USER", "")
-	t.Setenv("SKILL_LOGGER_SHARE_RAW", "")
-	t.Setenv("TURSO_DATABASE_URL", "")
-	t.Setenv("TURSO_AUTH_TOKEN", "")
+	clearEnvVars(t)
 
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.toml")
@@ -92,7 +82,10 @@ sync_interval = "30s"
 	}
 }
 
-func TestLoadEnvOverrides(t *testing.T) {
+func TestLoadEnvOverridesLegacyPrefix(t *testing.T) {
+	// Verifies SKILL_LOGGER_* env vars still work as a fallback so users
+	// upgrading from the old binary don't need to flip their shell profile.
+	clearEnvVars(t)
 	t.Setenv("SKILL_LOGGER_DB", "/env/events.db")
 	t.Setenv("SKILL_LOGGER_HOSTNAME", "env-host")
 	t.Setenv("SKILL_LOGGER_USER", "env@example.com")
@@ -210,6 +203,106 @@ func TestResolveDBPathDefault(t *testing.T) {
 	}
 	if filepath.Base(p) != "events.db" {
 		t.Errorf("default db path filename = %q, want events.db", filepath.Base(p))
+	}
+}
+
+func TestLoadMCPIgnore(t *testing.T) {
+	clearEnvVars(t)
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	body := `
+[mcp]
+ignore = ["claude_ai_Gmail", "figma/*", "*/authenticate"]
+`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	want := []string{"claude_ai_Gmail", "figma/*", "*/authenticate"}
+	if len(cfg.MCP.Ignore) != len(want) {
+		t.Fatalf("ignore len = %d, want %d (%v)", len(cfg.MCP.Ignore), len(want), cfg.MCP.Ignore)
+	}
+	for i, p := range want {
+		if cfg.MCP.Ignore[i] != p {
+			t.Errorf("ignore[%d] = %q, want %q", i, cfg.MCP.Ignore[i], p)
+		}
+	}
+}
+
+func TestLoadEnvAgentTracerTakesPrecedence(t *testing.T) {
+	clearEnvVars(t)
+	// When both prefixes are present, AGENT_TRACER_* wins.
+	t.Setenv("SKILL_LOGGER_DB", "/legacy.db")
+	t.Setenv("AGENT_TRACER_DB", "/new.db")
+	t.Setenv("SKILL_LOGGER_HOSTNAME", "legacy-host")
+	t.Setenv("AGENT_TRACER_HOSTNAME", "new-host")
+
+	dir := t.TempDir()
+	cfg, err := Load(filepath.Join(dir, "missing.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.DBPath != "/new.db" {
+		t.Errorf("DBPath = %q, want /new.db", cfg.DBPath)
+	}
+	if cfg.Hostname != "new-host" {
+		t.Errorf("Hostname = %q, want new-host", cfg.Hostname)
+	}
+}
+
+func TestDefaultDirPrefersAgentTracerWhenBothExist(t *testing.T) {
+	clearEnvVars(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	// Create both dirs — DefaultDir should prefer ~/.agent-tracer.
+	if err := os.Mkdir(filepath.Join(home, ".skill-logger"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(home, ".agent-tracer"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	got, err := DefaultDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != filepath.Join(home, ".agent-tracer") {
+		t.Errorf("DefaultDir = %q, want .agent-tracer", got)
+	}
+}
+
+func TestDefaultDirFallsBackToLegacy(t *testing.T) {
+	clearEnvVars(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	// Only the legacy dir exists — DefaultDir should return it.
+	if err := os.Mkdir(filepath.Join(home, ".skill-logger"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	got, err := DefaultDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != filepath.Join(home, ".skill-logger") {
+		t.Errorf("DefaultDir = %q, want .skill-logger fallback", got)
+	}
+}
+
+func clearEnvVars(t *testing.T) {
+	t.Helper()
+	for _, k := range []string{
+		"AGENT_TRACER_DIR", "AGENT_TRACER_CONFIG", "AGENT_TRACER_DB",
+		"AGENT_TRACER_HOSTNAME", "AGENT_TRACER_USER", "AGENT_TRACER_SHARE_RAW",
+		"SKILL_LOGGER_DIR", "SKILL_LOGGER_CONFIG", "SKILL_LOGGER_DB",
+		"SKILL_LOGGER_HOSTNAME", "SKILL_LOGGER_USER", "SKILL_LOGGER_SHARE_RAW",
+		"TURSO_DATABASE_URL", "TURSO_AUTH_TOKEN",
+	} {
+		t.Setenv(k, "")
 	}
 }
 

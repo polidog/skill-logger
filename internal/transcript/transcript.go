@@ -8,7 +8,7 @@ import (
 	"encoding/json"
 	"os"
 
-	"github.com/polidog/skill-logger/internal/store"
+	"github.com/polidog/agent-tracer/internal/store"
 )
 
 // LatestUsage scans the transcript JSONL backwards and returns the most recent

@@ -1,4 +1,4 @@
-module github.com/polidog/skill-logger
+module github.com/polidog/agent-tracer
 
 go 1.26.1
 

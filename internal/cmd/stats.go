@@ -10,8 +10,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/polidog/skill-logger/internal/projectname"
-	"github.com/polidog/skill-logger/internal/store"
+	"github.com/polidog/agent-tracer/internal/projectname"
+	"github.com/polidog/agent-tracer/internal/store"
 )
 
 func newStatsCmd() *cobra.Command {
@@ -161,7 +161,7 @@ func newVersionCmd() *cobra.Command {
 		Use:   "version",
 		Short: "Print version information",
 		Run: func(cmd *cobra.Command, args []string) {
-			fmt.Fprintln(cmd.OutOrStdout(), "skill-logger 0.1.0")
+			fmt.Fprintln(cmd.OutOrStdout(), "agent-tracer 0.2.0")
 		},
 	}
 }

@@ -13,16 +13,24 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// skillLoggerCommandMarker identifies command-type hook entries that this tool
-// owns. Any entry whose `command` field contains this marker is treated as
-// already-installed so re-running `init --write` stays idempotent.
-const skillLoggerCommandMarker = "skill-logger record"
+// agentTracerCommandMarkers identifies command-type hook entries that this
+// tool owns. Any entry whose `command` field contains one of these markers is
+// treated as already-installed so re-running `init --write` stays idempotent.
+// The legacy "skill-logger record" marker is preserved so existing users with
+// the old binary name still get the "already up to date" path during the
+// rename transition.
+var agentTracerCommandMarkers = []string{"agent-tracer record", "skill-logger record"}
 
 // Recommended commands wired into each event.
 const (
-	claudeRecordCmd = "skill-logger record --quiet"
-	codexRecordCmd  = "skill-logger record --quiet --source codex"
+	claudeRecordCmd = "agent-tracer record --quiet"
+	codexRecordCmd  = "agent-tracer record --quiet --source codex"
 )
+
+// claudeToolMatcher is the Pre/PostToolUse matcher we install. Claude Code
+// resolves matcher as a regular expression, so this catches both the Skill
+// tool and every MCP tool (whose name is `mcp__<server>__<tool>`).
+const claudeToolMatcher = "Skill|mcp__.*"
 
 func newInitCmd() *cobra.Command {
 	var (
@@ -33,13 +41,14 @@ func newInitCmd() *cobra.Command {
 	)
 	cmd := &cobra.Command{
 		Use:   "init",
-		Short: "Print or apply Claude Code / Codex hook configuration for skill-logger",
+		Short: "Print or apply Claude Code / Codex hook configuration for agent-tracer",
 		Long: `Print or apply hook configuration so that Claude Code and/or Codex pipe
-their hook payloads into "skill-logger record".
+their hook payloads into "agent-tracer record".
 
 Without --write the recommended snippets are printed to stdout so you can copy
-them manually. With --write the existing files are parsed, the skill-logger
-hook entries are merged in (idempotent — re-running won't duplicate them),
+them manually. With --write the existing files are parsed, the agent-tracer
+hook entries are merged in (idempotent — re-running won't duplicate them, and
+legacy "skill-logger record" entries also register as already-installed),
 and the result is written back.
 
 Files touched:
@@ -163,9 +172,9 @@ func claudeSnippet() (string, error) {
 
 func claudeRecommendedHooks() map[string]any {
 	return map[string]any{
-		"PreToolUse":       []any{makeClaudeEntry("Skill", claudeRecordCmd)},
+		"PreToolUse":       []any{makeClaudeEntry(claudeToolMatcher, claudeRecordCmd)},
 		"UserPromptSubmit": []any{makeClaudeEntry("", claudeRecordCmd)},
-		"PostToolUse":      []any{makeClaudeEntry("Skill", claudeRecordCmd)},
+		"PostToolUse":      []any{makeClaudeEntry(claudeToolMatcher, claudeRecordCmd)},
 		"Stop":             []any{makeClaudeEntry("", claudeRecordCmd)},
 	}
 }
@@ -224,9 +233,9 @@ func applyClaudeSettings(path string) (string, error) {
 	}
 
 	added := 0
-	mergeClaudeEvent(hooks, "PreToolUse", "Skill", &added)
+	mergeClaudeEvent(hooks, "PreToolUse", claudeToolMatcher, &added)
 	mergeClaudeEvent(hooks, "UserPromptSubmit", "", &added)
-	mergeClaudeEvent(hooks, "PostToolUse", "Skill", &added)
+	mergeClaudeEvent(hooks, "PostToolUse", claudeToolMatcher, &added)
 	mergeClaudeEvent(hooks, "Stop", "", &added)
 	doc["hooks"] = hooks
 
@@ -250,7 +259,7 @@ func applyClaudeSettings(path string) (string, error) {
 
 func mergeClaudeEvent(hooks map[string]any, event, matcher string, added *int) {
 	existing := asAnySlice(hooks[event])
-	if containsSkillLoggerEntry(existing) {
+	if containsAgentTracerEntry(existing) {
 		return
 	}
 	existing = append(existing, makeClaudeEntry(matcher, claudeRecordCmd))
@@ -303,7 +312,7 @@ func applyCodexConfig(path string) (string, error) {
 
 func mergeCodexEvent(hooks map[string]any, event string, added *int) {
 	existing := asAnySlice(hooks[event])
-	if containsSkillLoggerEntry(existing) {
+	if containsAgentTracerEntry(existing) {
 		return
 	}
 	entry := map[string]any{
@@ -337,11 +346,12 @@ func asAnySlice(v any) []any {
 	return nil
 }
 
-// containsSkillLoggerEntry reports whether any hook in the given event group
-// already runs a `skill-logger record …` command. We match by substring so
-// minor flag tweaks (e.g. `--quiet` vs no flag, or a different --source) all
-// register as "already installed" — re-running init won't duplicate them.
-func containsSkillLoggerEntry(entries []any) bool {
+// containsAgentTracerEntry reports whether any hook in the given event group
+// already runs an `agent-tracer record …` (or legacy `skill-logger record …`)
+// command. We match by substring so minor flag tweaks (e.g. `--quiet` vs no
+// flag, or a different --source) all register as "already installed" —
+// re-running init won't duplicate them.
+func containsAgentTracerEntry(entries []any) bool {
 	for _, e := range entries {
 		em, ok := asStringMap(e)
 		if !ok {
@@ -354,8 +364,10 @@ func containsSkillLoggerEntry(entries []any) bool {
 				continue
 			}
 			cmd, _ := hm["command"].(string)
-			if strings.Contains(cmd, skillLoggerCommandMarker) {
-				return true
+			for _, marker := range agentTracerCommandMarkers {
+				if strings.Contains(cmd, marker) {
+					return true
+				}
 			}
 		}
 	}

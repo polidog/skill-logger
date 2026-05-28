@@ -29,8 +29,8 @@ func TestApplyClaudeSettingsCreatesFile(t *testing.T) {
 		if len(entries) != 1 {
 			t.Errorf("%s: want 1 entry, got %d", ev, len(entries))
 		}
-		if !containsSkillLoggerEntry(entries) {
-			t.Errorf("%s: skill-logger entry not detected", ev)
+		if !containsAgentTracerEntry(entries) {
+			t.Errorf("%s: agent-tracer entry not detected", ev)
 		}
 	}
 }
@@ -65,13 +65,49 @@ func TestApplyClaudeSettingsPreservesExisting(t *testing.T) {
 	hooks := doc["hooks"].(map[string]any)
 	pre, _ := hooks["PreToolUse"].([]any)
 	if len(pre) != 2 {
-		t.Fatalf("PreToolUse: want 2 entries (existing + skill-logger), got %d", len(pre))
+		t.Fatalf("PreToolUse: want 2 entries (existing + agent-tracer), got %d", len(pre))
 	}
 	if !hasCommand(pre, "my-audit-tool") {
 		t.Errorf("existing my-audit-tool entry was lost")
 	}
-	if !hasCommand(pre, "skill-logger record") {
-		t.Errorf("skill-logger entry not added to PreToolUse")
+	if !hasCommand(pre, "agent-tracer record") {
+		t.Errorf("agent-tracer entry not added to PreToolUse")
+	}
+}
+
+func TestApplyClaudeSettingsLegacyMarkerStillIdempotent(t *testing.T) {
+	// Users upgrading from skill-logger may still have hook commands using
+	// the old binary name. init --write must treat those as already-installed
+	// to avoid stacking a duplicate agent-tracer entry next to the legacy one.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "settings.json")
+
+	initial := `{
+  "hooks": {
+    "PreToolUse": [
+      { "matcher": "Skill|mcp__.*", "hooks": [{ "type": "command", "command": "skill-logger record --quiet" }] }
+    ],
+    "PostToolUse": [
+      { "matcher": "Skill|mcp__.*", "hooks": [{ "type": "command", "command": "skill-logger record --quiet" }] }
+    ],
+    "UserPromptSubmit": [
+      { "hooks": [{ "type": "command", "command": "skill-logger record --quiet" }] }
+    ],
+    "Stop": [
+      { "hooks": [{ "type": "command", "command": "skill-logger record --quiet" }] }
+    ]
+  }
+}`
+	if err := os.WriteFile(path, []byte(initial), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	summary, err := applyClaudeSettings(path)
+	if err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if !strings.Contains(summary, "already up to date") {
+		t.Errorf("legacy markers should be detected as installed, got %q", summary)
 	}
 }
 
@@ -116,8 +152,8 @@ func TestApplyCodexConfigCreatesFile(t *testing.T) {
 		if len(entries) != 1 {
 			t.Errorf("%s: want 1 entry, got %d", ev, len(entries))
 		}
-		if !containsSkillLoggerEntry(entries) {
-			t.Errorf("%s: skill-logger entry not detected", ev)
+		if !containsAgentTracerEntry(entries) {
+			t.Errorf("%s: agent-tracer entry not detected", ev)
 		}
 	}
 }
@@ -150,13 +186,13 @@ command = "my-audit-tool"
 	hooks := doc["hooks"].(map[string]any)
 	ups := asAnySlice(hooks["UserPromptSubmit"])
 	if len(ups) != 2 {
-		t.Fatalf("UserPromptSubmit: want 2 (existing + skill-logger), got %d", len(ups))
+		t.Fatalf("UserPromptSubmit: want 2 (existing + agent-tracer), got %d", len(ups))
 	}
 	if !hasCommand(ups, "my-audit-tool") {
 		t.Errorf("existing my-audit-tool entry lost")
 	}
-	if !hasCommand(ups, "skill-logger record") {
-		t.Errorf("skill-logger entry not added")
+	if !hasCommand(ups, "agent-tracer record") {
+		t.Errorf("agent-tracer entry not added")
 	}
 }
 

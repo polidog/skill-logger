@@ -19,6 +19,7 @@ type Kind string
 const (
 	KindSkill   Kind = "skill"
 	KindCommand Kind = "command"
+	KindMCP     Kind = "mcp"
 )
 
 type Event struct {
@@ -215,9 +216,10 @@ func (s *Store) Insert(ctx context.Context, e Event) error {
 	return err
 }
 
-// UpdateBySkillToolUseID fills duration + usage for a previously-inserted
-// skill row identified by tool_use_id. Returns the number of rows updated.
-func (s *Store) UpdateBySkillToolUseID(ctx context.Context, toolUseID string, durationMs int64, u Usage) (int64, error) {
+// UpdateByToolUseID fills duration + usage for a previously-inserted tool row
+// (skill or mcp) identified by tool_use_id. Returns the number of rows updated.
+// Commands have no tool_use_id, so the kind filter is implicit.
+func (s *Store) UpdateByToolUseID(ctx context.Context, toolUseID string, durationMs int64, u Usage) (int64, error) {
 	res, err := s.db.ExecContext(ctx,
 		`UPDATE events
 		   SET duration_ms = ?,
@@ -225,7 +227,7 @@ func (s *Store) UpdateBySkillToolUseID(ctx context.Context, toolUseID string, du
 		       output_tokens = ?,
 		       cache_read_tokens = ?,
 		       cache_creation_tokens = ?
-		 WHERE tool_use_id = ? AND kind = 'skill' AND duration_ms = 0`,
+		 WHERE tool_use_id = ? AND duration_ms = 0`,
 		durationMs, u.InputTokens, u.OutputTokens, u.CacheReadTokens, u.CacheCreationTokens, toolUseID,
 	)
 	if err != nil {
@@ -240,15 +242,17 @@ type PendingRow struct {
 	Timestamp time.Time
 }
 
-// PendingRows returns every still-pending (duration_ms = 0) command or skill
-// row in the given session, oldest first. Used by the Stop hook to finalize
-// every event that opened during the turn — Codex turns can produce multiple
-// pending skill rows from `$mention` injection, and Claude turns can still
-// have unfinalized commands or skills that PostToolUse never closed.
+// PendingRows returns every still-pending (duration_ms = 0) command, skill or
+// mcp row in the given session, oldest first. Used by the Stop hook to
+// finalize every event that opened during the turn — Codex turns can produce
+// multiple pending skill rows from `$mention` injection, and Claude turns can
+// still have unfinalized commands, skills, or MCP tool calls that PostToolUse
+// never closed.
 func (s *Store) PendingRows(ctx context.Context, sessionID string) ([]PendingRow, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, kind, ts FROM events
-		  WHERE session_id = ? AND duration_ms = 0 AND (kind = 'command' OR kind = 'skill')
+		  WHERE session_id = ? AND duration_ms = 0
+		    AND kind IN ('command', 'skill', 'mcp')
 		  ORDER BY id ASC`, sessionID)
 	if err != nil {
 		return nil, err
@@ -291,12 +295,12 @@ func (s *Store) FinalizeRow(ctx context.Context, id, durationMs int64, u Usage) 
 	return res.RowsAffected()
 }
 
-// StartTime returns the original timestamp of an event identified by tool_use_id.
-// Used to compute skill duration in record cmd.
+// StartTime returns the original timestamp of an event identified by
+// tool_use_id (skill or mcp). Used to compute tool duration in record cmd.
 func (s *Store) StartTime(ctx context.Context, toolUseID string) (time.Time, bool, error) {
 	var ts string
 	err := s.db.QueryRowContext(ctx,
-		`SELECT ts FROM events WHERE tool_use_id = ? AND kind = 'skill' ORDER BY id DESC LIMIT 1`,
+		`SELECT ts FROM events WHERE tool_use_id = ? ORDER BY id DESC LIMIT 1`,
 		toolUseID,
 	).Scan(&ts)
 	if err != nil {

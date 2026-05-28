@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/polidog/skill-logger/internal/config"
+	"github.com/polidog/agent-tracer/internal/config"
 )
 
 // newTestStore opens a fresh file-backed libsql DB inside the test's tempdir
@@ -355,7 +355,7 @@ func TestSkillFinalizeByToolUseID(t *testing.T) {
 	}
 
 	u := Usage{InputTokens: 1, OutputTokens: 2, CacheReadTokens: 3, CacheCreationTokens: 4}
-	n, err := s.UpdateBySkillToolUseID(context.Background(), "tu_x", 2000, u)
+	n, err := s.UpdateByToolUseID(context.Background(), "tu_x", 2000, u)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -364,7 +364,7 @@ func TestSkillFinalizeByToolUseID(t *testing.T) {
 	}
 
 	// Second update is a no-op (WHERE duration_ms = 0).
-	n2, _ := s.UpdateBySkillToolUseID(context.Background(), "tu_x", 9999, u)
+	n2, _ := s.UpdateByToolUseID(context.Background(), "tu_x", 9999, u)
 	if n2 != 0 {
 		t.Errorf("second update should be no-op, got %d", n2)
 	}

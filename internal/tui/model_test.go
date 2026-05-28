@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/polidog/skill-logger/internal/store"
+	"github.com/polidog/agent-tracer/internal/store"
 )
 
 func TestFmtDuration(t *testing.T) {

@@ -11,8 +11,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/polidog/skill-logger/internal/store"
-	"github.com/polidog/skill-logger/internal/transcript"
+	"github.com/polidog/agent-tracer/internal/store"
+	"github.com/polidog/agent-tracer/internal/transcript"
 )
 
 type hookPayload struct {
@@ -35,7 +35,10 @@ type recordAction int
 
 const (
 	actionNone recordAction = iota
-	actionFinishSkill
+	// actionFinishTool finalizes the row identified by tool_use_id. It covers
+	// both Skill PostToolUse (Claude only) and MCP PostToolUse (any tool whose
+	// name starts with "mcp__").
+	actionFinishTool
 	actionFinishTurn
 )
 
@@ -108,13 +111,13 @@ exit 0 silently (so it never blocks the hook).`,
 			if len(data) > 0 {
 				if err := json.Unmarshal(data, &p); err != nil {
 					if !quiet {
-						fmt.Fprintf(os.Stderr, "skill-logger: ignoring non-JSON stdin: %v\n", err)
+						fmt.Fprintf(os.Stderr, "agent-tracer: ignoring non-JSON stdin: %v\n", err)
 					}
 					return nil
 				}
 			}
 
-			res := classify(p, source, kindOvr, nameOvr)
+			res := classify(p, source, kindOvr, nameOvr, cfg.MCP.Ignore)
 			if len(res.inserts) == 0 && res.finalize == actionNone {
 				return nil
 			}
@@ -155,12 +158,12 @@ exit 0 silently (so it never blocks the hook).`,
 					return fmt.Errorf("insert: %w", err)
 				}
 				if !quiet {
-					fmt.Fprintf(os.Stderr, "skill-logger: recorded %s/%s = %s\n", ev.Source, ev.Kind, ev.Name)
+					fmt.Fprintf(os.Stderr, "agent-tracer: recorded %s/%s = %s\n", ev.Source, ev.Kind, ev.Name)
 				}
 			}
 
 			switch res.finalize {
-			case actionFinishSkill:
+			case actionFinishTool:
 				u, _ := transcript.LatestUsage(p.TranscriptPath, source)
 				start, ok, err := s.StartTime(ctx, p.ToolUseID)
 				if err != nil {
@@ -174,12 +177,12 @@ exit 0 silently (so it never blocks the hook).`,
 				if dur < 0 {
 					dur = 0
 				}
-				n, err := s.UpdateBySkillToolUseID(ctx, p.ToolUseID, dur, u)
+				n, err := s.UpdateByToolUseID(ctx, p.ToolUseID, dur, u)
 				if err != nil {
-					return fmt.Errorf("update skill: %w", err)
+					return fmt.Errorf("update tool: %w", err)
 				}
 				if !quiet && n > 0 {
-					fmt.Fprintf(os.Stderr, "skill-logger: finalized skill %s (%dms, ctx=%d)\n",
+					fmt.Fprintf(os.Stderr, "agent-tracer: finalized tool %s (%dms, ctx=%d)\n",
 						p.ToolUseID, dur, u.InputTokens+u.CacheReadTokens+u.CacheCreationTokens)
 				}
 
@@ -208,7 +211,7 @@ exit 0 silently (so it never blocks the hook).`,
 					finalized += n
 				}
 				if !quiet && finalized > 0 {
-					fmt.Fprintf(os.Stderr, "skill-logger: finalized %d row(s) in %s (ctx=%d)\n",
+					fmt.Fprintf(os.Stderr, "agent-tracer: finalized %d row(s) in %s (ctx=%d)\n",
 						finalized, p.SessionID, u.InputTokens+u.CacheReadTokens+u.CacheCreationTokens)
 				}
 			}
@@ -218,8 +221,8 @@ exit 0 silently (so it never blocks the hook).`,
 	cmd.Flags().StringVar(&source, "source", "claude", "source tool (claude|codex)")
 	cmd.Flags().StringVar(&kindOvr, "kind", "", "override detected kind (skill|command)")
 	cmd.Flags().StringVar(&nameOvr, "name", "", "override detected name")
-	cmd.Flags().StringVar(&hostOvr, "host", "", "override host (default: config.hostname > $SKILL_LOGGER_HOSTNAME > os.Hostname())")
-	cmd.Flags().StringVar(&userOvr, "user", "", "override user (default: config.user > $SKILL_LOGGER_USER > git config user.email)")
+	cmd.Flags().StringVar(&hostOvr, "host", "", "override host (default: config.hostname > $AGENT_TRACER_HOSTNAME > $SKILL_LOGGER_HOSTNAME > os.Hostname())")
+	cmd.Flags().StringVar(&userOvr, "user", "", "override user (default: config.user > $AGENT_TRACER_USER > $SKILL_LOGGER_USER > git config user.email)")
 	cmd.Flags().BoolVarP(&quiet, "quiet", "q", false, "suppress stderr messages")
 	return cmd
 }
@@ -228,28 +231,44 @@ exit 0 silently (so it never blocks the hook).`,
 // what record should do. Returns the list of rows to insert plus an optional
 // finalize action. For Codex sources, UserPromptSubmit prompts are also
 // scanned for `$skill-name` mentions since Codex injects skills via prompt
-// mentions rather than a dedicated Skill tool.
-func classify(p hookPayload, source, kindOvr, nameOvr string) classifyResult {
+// mentions rather than a dedicated Skill tool. MCP tool calls (tool_name
+// starting with "mcp__") are recorded as kind=mcp; mcpIgnore globs suppress
+// noisy or sensitive servers/tools before they hit the DB.
+func classify(p hookPayload, source, kindOvr, nameOvr string, mcpIgnore []string) classifyResult {
 	switch p.HookEventName {
 	case "PreToolUse":
-		if p.ToolName != "Skill" {
-			return classifyResult{}
-		}
-		name := nameOvr
-		if name == "" && len(p.ToolInput) > 0 {
-			var ti skillToolInput
-			if err := json.Unmarshal(p.ToolInput, &ti); err == nil {
-				name = ti.Skill
+		if p.ToolName == "Skill" {
+			name := nameOvr
+			if name == "" && len(p.ToolInput) > 0 {
+				var ti skillToolInput
+				if err := json.Unmarshal(p.ToolInput, &ti); err == nil {
+					name = ti.Skill
+				}
 			}
+			if name == "" {
+				return classifyResult{}
+			}
+			kind := store.KindSkill
+			if kindOvr != "" {
+				kind = store.Kind(kindOvr)
+			}
+			return classifyResult{inserts: []insertSpec{{kind: kind, name: name}}}
 		}
-		if name == "" {
-			return classifyResult{}
+		if server, tool, ok := parseMCPTool(p.ToolName); ok {
+			if matchMCPIgnore(server, tool, mcpIgnore) {
+				return classifyResult{}
+			}
+			name := nameOvr
+			if name == "" {
+				name = mcpDisplayName(server, tool)
+			}
+			kind := store.KindMCP
+			if kindOvr != "" {
+				kind = store.Kind(kindOvr)
+			}
+			return classifyResult{inserts: []insertSpec{{kind: kind, name: name}}}
 		}
-		kind := store.KindSkill
-		if kindOvr != "" {
-			kind = store.Kind(kindOvr)
-		}
-		return classifyResult{inserts: []insertSpec{{kind: kind, name: name}}}
+		return classifyResult{}
 
 	case "UserPromptSubmit":
 		prompt := strings.TrimSpace(p.Prompt)
@@ -287,8 +306,11 @@ func classify(p hookPayload, source, kindOvr, nameOvr string) classifyResult {
 		return classifyResult{inserts: inserts}
 
 	case "PostToolUse":
-		if p.ToolName == "Skill" && p.ToolUseID != "" {
-			return classifyResult{finalize: actionFinishSkill}
+		if p.ToolUseID == "" {
+			return classifyResult{}
+		}
+		if p.ToolName == "Skill" || strings.HasPrefix(p.ToolName, "mcp__") {
+			return classifyResult{finalize: actionFinishTool}
 		}
 		return classifyResult{}
 

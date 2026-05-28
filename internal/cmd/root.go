@@ -8,9 +8,9 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/spf13/cobra"
 
-	"github.com/polidog/skill-logger/internal/config"
-	"github.com/polidog/skill-logger/internal/store"
-	"github.com/polidog/skill-logger/internal/tui"
+	"github.com/polidog/agent-tracer/internal/config"
+	"github.com/polidog/agent-tracer/internal/store"
+	"github.com/polidog/agent-tracer/internal/tui"
 )
 
 var (
@@ -20,24 +20,25 @@ var (
 
 func New() *cobra.Command {
 	root := &cobra.Command{
-		Use:   "skill-logger",
-		Short: "Record and view Claude Code / Codex skill and slash command usage",
-		Long: `skill-logger records which Skills and slash commands you use in Claude Code
-(and optionally Codex) and lets you browse the stats in a terminal UI.
+		Use:   "agent-tracer",
+		Short: "Record and view Claude Code / Codex skill, slash command, and MCP tool usage",
+		Long: `agent-tracer records which Skills, slash commands, and MCP tools you use in
+Claude Code (and optionally Codex) and lets you browse the stats in a terminal UI.
 
-Run "skill-logger" with no arguments to launch the TUI.
+Run "agent-tracer" with no arguments to launch the TUI.
 
-Configure your ~/.claude/settings.json hooks so that PreToolUse(Skill) and
-UserPromptSubmit pipe their JSON payload into "skill-logger record" — see the
+Configure your ~/.claude/settings.json hooks so that PreToolUse(Skill|mcp__.*) and
+UserPromptSubmit pipe their JSON payload into "agent-tracer record" — see the
 README for a copy-pasteable snippet.
 
 Storage backend (local SQLite vs Turso Embedded Replicas) is selected via
-~/.skill-logger/config.toml. See the README for fields.`,
+~/.agent-tracer/config.toml (legacy ~/.skill-logger/config.toml is also read
+as a fallback). See the README for fields.`,
 		SilenceUsage: true,
 		RunE:         runTUI,
 	}
 	root.PersistentFlags().StringVar(&flagDBPath, "db", "", "override db_path from config (file path)")
-	root.PersistentFlags().StringVar(&flagConfigPath, "config", "", "path to config.toml (default: $SKILL_LOGGER_CONFIG or ~/.skill-logger/config.toml)")
+	root.PersistentFlags().StringVar(&flagConfigPath, "config", "", "path to config.toml (default: $AGENT_TRACER_CONFIG or ~/.agent-tracer/config.toml; legacy $SKILL_LOGGER_CONFIG / ~/.skill-logger/config.toml also honored)")
 
 	root.AddCommand(newRecordCmd())
 	root.AddCommand(newStatsCmd())

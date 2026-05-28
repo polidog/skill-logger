@@ -21,7 +21,10 @@ const (
 	ModeTurso Mode = "turso"
 )
 
-// Config is the on-disk shape of ~/.skill-logger/config.toml.
+// Config is the on-disk shape of ~/.agent-tracer/config.toml.
+// The legacy ~/.skill-logger/config.toml location is also honored as a
+// fallback so users carrying over data from the old binary name don't have
+// to migrate manually.
 type Config struct {
 	Mode     Mode   `toml:"mode"`
 	DBPath   string `toml:"db_path"`
@@ -33,9 +36,19 @@ type Config struct {
 	// exposed to other team members.
 	ShareRaw *bool `toml:"share_raw"`
 	Turso    Turso `toml:"turso"`
+	MCP      MCP   `toml:"mcp"`
 
 	// Path is the resolved config file path (empty if no file was loaded).
 	Path string `toml:"-"`
+}
+
+// MCP holds settings that govern how MCP tool calls are recorded. The defaults
+// (Ignore=nil) record every MCP call; populate Ignore with glob patterns to
+// suppress noisy or sensitive servers/tools.
+type MCP struct {
+	// Ignore is a list of glob patterns matched against "server/tool" (or just
+	// "server" as shorthand for "server/*"). Patterns use path.Match semantics.
+	Ignore []string `toml:"ignore"`
 }
 
 // Turso holds settings for libsql Embedded Replicas. It is only consulted when
@@ -75,8 +88,18 @@ func (t *Turso) UnmarshalTOML(data any) error {
 	return nil
 }
 
-// DefaultDir returns the configuration / data directory for skill-logger.
+// DefaultDir returns the configuration / data directory for agent-tracer.
+// Resolution order:
+//  1. $AGENT_TRACER_DIR (preferred)
+//  2. $SKILL_LOGGER_DIR (legacy)
+//  3. ~/.agent-tracer if it exists
+//  4. ~/.skill-logger if it exists (legacy fallback so existing users keep
+//     working without manual migration)
+//  5. ~/.agent-tracer (created on demand when nothing exists yet)
 func DefaultDir() (string, error) {
+	if v := os.Getenv("AGENT_TRACER_DIR"); v != "" {
+		return expand(v), nil
+	}
 	if v := os.Getenv("SKILL_LOGGER_DIR"); v != "" {
 		return expand(v), nil
 	}
@@ -84,11 +107,22 @@ func DefaultDir() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, ".skill-logger"), nil
+	newDir := filepath.Join(home, ".agent-tracer")
+	if _, err := os.Stat(newDir); err == nil {
+		return newDir, nil
+	}
+	legacyDir := filepath.Join(home, ".skill-logger")
+	if _, err := os.Stat(legacyDir); err == nil {
+		return legacyDir, nil
+	}
+	return newDir, nil
 }
 
 // DefaultPath is the default config file location.
 func DefaultPath() (string, error) {
+	if v := os.Getenv("AGENT_TRACER_CONFIG"); v != "" {
+		return expand(v), nil
+	}
 	if v := os.Getenv("SKILL_LOGGER_CONFIG"); v != "" {
 		return expand(v), nil
 	}
@@ -102,11 +136,15 @@ func DefaultPath() (string, error) {
 // Load loads the config from `path`. If `path` is empty, DefaultPath() is used.
 // A missing file is not an error: defaults are returned with Path="".
 //
-// Env overrides applied after the file is read:
-//   - SKILL_LOGGER_DB           -> DBPath
-//   - SKILL_LOGGER_HOSTNAME     -> Hostname (overrides os.Hostname() at record time)
-//   - TURSO_DATABASE_URL        -> Turso.URL (also forces Mode=turso if Mode unset)
-//   - TURSO_AUTH_TOKEN          -> Turso.AuthToken
+// Env overrides applied after the file is read. AGENT_TRACER_* takes
+// precedence over the legacy SKILL_LOGGER_* prefix when both are set.
+//
+//   - AGENT_TRACER_DB / SKILL_LOGGER_DB                 -> DBPath
+//   - AGENT_TRACER_HOSTNAME / SKILL_LOGGER_HOSTNAME     -> Hostname
+//   - AGENT_TRACER_USER / SKILL_LOGGER_USER             -> User
+//   - AGENT_TRACER_SHARE_RAW / SKILL_LOGGER_SHARE_RAW   -> ShareRaw
+//   - TURSO_DATABASE_URL                                -> Turso.URL (also forces Mode=turso)
+//   - TURSO_AUTH_TOKEN                                  -> Turso.AuthToken
 func Load(path string) (*Config, error) {
 	if path == "" {
 		p, err := DefaultPath()
@@ -126,7 +164,7 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
 
-	if v := os.Getenv("SKILL_LOGGER_DB"); v != "" {
+	if v := envFirst("AGENT_TRACER_DB", "SKILL_LOGGER_DB"); v != "" {
 		cfg.DBPath = expand(v)
 	}
 	if v := os.Getenv("TURSO_DATABASE_URL"); v != "" {
@@ -138,13 +176,13 @@ func Load(path string) (*Config, error) {
 	if v := os.Getenv("TURSO_AUTH_TOKEN"); v != "" {
 		cfg.Turso.AuthToken = v
 	}
-	if v := os.Getenv("SKILL_LOGGER_HOSTNAME"); v != "" {
+	if v := envFirst("AGENT_TRACER_HOSTNAME", "SKILL_LOGGER_HOSTNAME"); v != "" {
 		cfg.Hostname = v
 	}
-	if v := os.Getenv("SKILL_LOGGER_USER"); v != "" {
+	if v := envFirst("AGENT_TRACER_USER", "SKILL_LOGGER_USER"); v != "" {
 		cfg.User = v
 	}
-	if v := os.Getenv("SKILL_LOGGER_SHARE_RAW"); v != "" {
+	if v := envFirst("AGENT_TRACER_SHARE_RAW", "SKILL_LOGGER_SHARE_RAW"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
 			cfg.ShareRaw = &b
 		}
@@ -154,6 +192,18 @@ func Load(path string) (*Config, error) {
 	}
 	cfg.DBPath = expand(cfg.DBPath)
 	return cfg, nil
+}
+
+// envFirst returns the first non-empty environment variable from the given
+// names. Used to make AGENT_TRACER_* take precedence over the legacy
+// SKILL_LOGGER_* prefix during the transition.
+func envFirst(names ...string) string {
+	for _, n := range names {
+		if v := os.Getenv(n); v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // ResolveHostname returns Config.Hostname when set, otherwise falls back to
